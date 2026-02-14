@@ -47,3 +47,18 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# Data folder
+Data/
+
+# Testing results folder
+Results/
+
+# Models folder
+Weekly_Modelling/Euro.Rd2/
+Weekly_Modelling/PGA.Rd2/
+Weekly_Modelling/PGA/
+
+# Output & Input folder
+Weekly_Modelling/Input/
+Weekly_Modelling/Output/
