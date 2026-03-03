@@ -66,3 +66,4 @@ Weekly_Modelling/Output/
 # Python pipeline data & model output (mirrors R exclusions)
 Weekly_Modelling_Python/Input/
 Weekly_Modelling_Python/Output/
+__pycache__/
