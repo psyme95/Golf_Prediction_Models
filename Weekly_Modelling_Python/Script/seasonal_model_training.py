@@ -82,6 +82,18 @@ def _cv_log_loss(model, X: np.ndarray, y: np.ndarray, seed: int) -> float:
     return -float(scores.mean())
 
 
+def _cv_roc_auc(model, X: np.ndarray, y: np.ndarray, seed: int) -> float:
+    """
+    ROC-AUC via cross-validation.
+    Used as the Optuna objective (returned negated so direction="minimize").
+    Unlike log-loss, AUC is not fooled by near-constant predictions on
+    severely imbalanced targets (e.g. Winner at 0.8% prevalence).
+    """
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
+    scores = cross_val_score(model, X, y, cv=cv, scoring="roc_auc", n_jobs=-1)
+    return -float(scores.mean())   # negate → minimise negative AUC
+
+
 def tune_logistic(X, y, n_trials, warm_params=None, seed=RANDOM_SEED):
     def objective(trial):
         C        = trial.suggest_float("C", 1e-3, 10.0, log=True)
@@ -90,7 +102,7 @@ def tune_logistic(X, y, n_trials, warm_params=None, seed=RANDOM_SEED):
             penalty="elasticnet", solver="saga", C=C, l1_ratio=l1_ratio,
             class_weight="balanced", max_iter=2000, random_state=seed,
         )
-        return _cv_log_loss(model, X, y, seed)
+        return _cv_roc_auc(model, X, y, seed)
 
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
@@ -100,22 +112,26 @@ def tune_logistic(X, y, n_trials, warm_params=None, seed=RANDOM_SEED):
     return study.best_params
 
 
-def tune_rf(X, y, n_trials, warm_params=None, seed=RANDOM_SEED):
+def tune_rf(X, y, n_trials, n_pos=None, warm_params=None, seed=RANDOM_SEED):
     _mf_map = {"sqrt": "sqrt", "log2": "log2", "frac03": 0.3, "frac05": 0.5}
+    # Cap upper bound at 2×positives so trees can actually isolate them.
+    # E.g. Winner (31 pos) → max leaf 62; Top20 (692 pos) → capped at 200.
+    _n_pos = int(y.sum()) if n_pos is None else n_pos
+    _leaf_max = min(200, max(5, _n_pos * 2))
 
     def objective(trial):
         mf_key = trial.suggest_categorical("max_features", list(_mf_map.keys()))
         model = RandomForestClassifier(
             n_estimators        = trial.suggest_int("n_estimators", 300, 1500),
             max_features        = _mf_map[mf_key],
-            min_samples_leaf    = trial.suggest_int("min_samples_leaf", 50, 400),
+            min_samples_leaf    = trial.suggest_int("min_samples_leaf", 1, _leaf_max),
             max_depth           = trial.suggest_categorical("max_depth",
                                       [None, 5, 10, 15, 20]),
             class_weight        = "balanced",
             n_jobs              = -1,
             random_state        = seed,
         )
-        return _cv_log_loss(model, X, y, seed)
+        return _cv_roc_auc(model, X, y, seed)
 
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
@@ -125,13 +141,16 @@ def tune_rf(X, y, n_trials, warm_params=None, seed=RANDOM_SEED):
     return study.best_params
 
 
-def tune_lgbm(X, y, n_trials, warm_params=None, seed=RANDOM_SEED):
+def tune_lgbm(X, y, n_trials, n_pos=None, warm_params=None, seed=RANDOM_SEED):
+    _n_pos = int(y.sum()) if n_pos is None else n_pos
+    _child_max = min(200, max(5, _n_pos * 2))
+
     def objective(trial):
         model = lgb.LGBMClassifier(
             n_estimators        = trial.suggest_int("n_estimators", 100, 1000),
             num_leaves          = trial.suggest_int("num_leaves", 20, 150),
             learning_rate       = trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-            min_child_samples   = trial.suggest_int("min_child_samples", 20, 200),
+            min_child_samples   = trial.suggest_int("min_child_samples", 1, _child_max),
             subsample           = trial.suggest_float("subsample", 0.5, 1.0),
             colsample_bytree    = trial.suggest_float("colsample_bytree", 0.5, 1.0),
             reg_alpha           = trial.suggest_float("reg_alpha", 1e-4, 1.0, log=True),
@@ -140,7 +159,7 @@ def tune_lgbm(X, y, n_trials, warm_params=None, seed=RANDOM_SEED):
             random_state        = seed,
             verbose             = -1,
         )
-        return _cv_log_loss(model, X, y, seed)
+        return _cv_roc_auc(model, X, y, seed)
 
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
@@ -167,7 +186,7 @@ def tune_xgb(X, y, n_trials, scale_pos_weight, warm_params=None, seed=RANDOM_SEE
             random_state        = seed,
             verbosity           = 0,
         )
-        return _cv_log_loss(model, X, y, seed)
+        return _cv_roc_auc(model, X, y, seed)
 
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
@@ -177,14 +196,17 @@ def tune_xgb(X, y, n_trials, scale_pos_weight, warm_params=None, seed=RANDOM_SEE
     return study.best_params
 
 
-def tune_lgbm_dart(X, y, n_trials, warm_params=None, seed=RANDOM_SEED):
+def tune_lgbm_dart(X, y, n_trials, n_pos=None, warm_params=None, seed=RANDOM_SEED):
+    _n_pos = int(y.sum()) if n_pos is None else n_pos
+    _child_max = min(200, max(5, _n_pos * 2))
+
     def objective(trial):
         model = lgb.LGBMClassifier(
             boosting_type       = "dart",
             n_estimators        = trial.suggest_int("n_estimators", 100, 500),
             num_leaves          = trial.suggest_int("num_leaves", 20, 100),
             learning_rate       = trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-            min_child_samples   = trial.suggest_int("min_child_samples", 20, 200),
+            min_child_samples   = trial.suggest_int("min_child_samples", 1, _child_max),
             subsample           = trial.suggest_float("subsample", 0.5, 1.0),
             colsample_bytree    = trial.suggest_float("colsample_bytree", 0.5, 1.0),
             drop_rate           = trial.suggest_float("drop_rate", 0.05, 0.3),
@@ -192,7 +214,7 @@ def tune_lgbm_dart(X, y, n_trials, warm_params=None, seed=RANDOM_SEED):
             random_state        = seed,
             verbose             = -1,
         )
-        return _cv_log_loss(model, X, y, seed)
+        return _cv_roc_auc(model, X, y, seed)
 
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
@@ -297,12 +319,12 @@ def train_market(market_name, market_config, train_df, tour_key, model_vars):
     # --- Tune each model ---
     print(f"    Tuning {OPTUNA_TRIALS} Optuna trials per model...")
 
-    logistic_params = tune_logistic(X, y, OPTUNA_TRIALS, warm_params=load_warm("logistic"))
-    rf_params       = tune_rf(      X, y, OPTUNA_TRIALS, warm_params=load_warm("rf"))
-    lgbm_params     = tune_lgbm(    X, y, OPTUNA_TRIALS, warm_params=load_warm("lgbm"))
-    xgb_params      = tune_xgb(     X, y, OPTUNA_TRIALS, scale_pos_weight=spw,
-                                    warm_params=load_warm("xgb"))
-    dart_params     = tune_lgbm_dart(X, y, OPTUNA_TRIALS, warm_params=load_warm("lgbm_dart"))
+    logistic_params = tune_logistic( X, y, OPTUNA_TRIALS, warm_params=load_warm("logistic"))
+    rf_params       = tune_rf(       X, y, OPTUNA_TRIALS, n_pos=n_pos, warm_params=load_warm("rf"))
+    lgbm_params     = tune_lgbm(     X, y, OPTUNA_TRIALS, n_pos=n_pos, warm_params=load_warm("lgbm"))
+    xgb_params      = tune_xgb(      X, y, OPTUNA_TRIALS, scale_pos_weight=spw,
+                                     warm_params=load_warm("xgb"))
+    dart_params     = tune_lgbm_dart(X, y, OPTUNA_TRIALS, n_pos=n_pos, warm_params=load_warm("lgbm_dart"))
 
     # Save best params for next season warm-start
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
