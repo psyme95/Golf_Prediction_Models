@@ -146,13 +146,16 @@ def apply_back_strategy(df: pd.DataFrame, odds_col: str,
     Fixed stake BACK_STAKE per bet.
     """
     df = df.copy()
-    df["Back_Bet"] = df["Normalised_Model_Odds"] < df[odds_col]
-
-    df["Back_PnL"] = 0.0
-    won  = df["Back_Bet"] & (df[target_col] == 1)
-    lost = df["Back_Bet"] & (df[target_col] == 0)
-    df.loc[won,  "Back_PnL"] = (df.loc[won,  odds_col] - 1) * BACK_STAKE
-    df.loc[lost, "Back_PnL"] = -BACK_STAKE
+    mkt    = df[odds_col].to_numpy(dtype=float)
+    actual = df[target_col].to_numpy(dtype=float)
+    model  = df["Normalised_Model_Odds"].to_numpy(dtype=float)
+    is_back = model < mkt
+    is_win  = actual == 1
+    df["Back_Bet"] = is_back
+    df["Back_PnL"] = np.where(
+        is_back & is_win,  (mkt - 1) * BACK_STAKE,
+        np.where(is_back, -BACK_STAKE, 0.0)
+    )
     return df
 
 
@@ -169,27 +172,21 @@ def apply_lay_strategy(df: pd.DataFrame, odds_col: str,
                                   = LAY_TOTAL_LIABILITY (£1000).
     """
     df = df.copy()
+    mkt    = df[odds_col].to_numpy(dtype=float)
+    actual = df[target_col].to_numpy(dtype=float)
+    model  = df["Normalised_Model_Odds"].to_numpy(dtype=float)
     liability_per_bet = LAY_TOTAL_LIABILITY / market_size
-
-    df["Lay_Bet"]       = df["Normalised_Model_Odds"] > df[odds_col]
-    df["Lay_Liability"] = 0.0
-    df["Lay_Stake"]     = 0.0
-    df["Lay_PnL"]       = 0.0
-
-    mask = df["Lay_Bet"]
-    if mask.sum() == 0:
-        return df
-
-    lay_odds = LAY_ODDS_MULTIPLIER * df.loc[mask, odds_col]
-    lay_stake = liability_per_bet / (lay_odds - 1).clip(lower=1e-8)
-
-    df.loc[mask, "Lay_Liability"] = liability_per_bet
-    df.loc[mask, "Lay_Stake"]     = lay_stake.round(4)
-
-    won  = mask & (df[target_col] == 0)   # lay wins when player misses market
-    lost = mask & (df[target_col] == 1)   # lay loses when player hits market
-    df.loc[won,  "Lay_PnL"] = df.loc[won,  "Lay_Stake"]
-    df.loc[lost, "Lay_PnL"] = -liability_per_bet
+    lay_odds  = LAY_ODDS_MULTIPLIER * mkt
+    lay_stake = liability_per_bet / np.maximum(lay_odds - 1, 1e-8)
+    is_lay = model > mkt
+    is_win = actual == 1
+    df["Lay_Bet"]       = is_lay
+    df["Lay_Liability"] = np.where(is_lay, liability_per_bet, 0.0)
+    df["Lay_Stake"]     = np.round(np.where(is_lay, lay_stake, 0.0), 4)
+    df["Lay_PnL"]       = np.where(
+        is_lay & ~is_win, np.where(is_lay, lay_stake, 0.0),
+        np.where(is_lay & is_win, -liability_per_bet, 0.0)
+    )
     return df
 
 
