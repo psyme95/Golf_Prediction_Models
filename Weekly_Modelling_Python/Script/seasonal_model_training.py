@@ -13,7 +13,8 @@ Key differences from R version:
   - class_weight / scale_pos_weight handles imbalance instead of TSS threshold tricks
   - RepeatedStratifiedKFold OOF predictions feed a LogisticRegression meta-model
     that performs ensemble weighting + probability calibration in one step
-  - Log-loss replaces TSS as the training/evaluation metric
+  - Average Precision (PR-AUC) is the Optuna objective — rewards precision at the
+    top of the ranked list, directly aligned with back/lay betting on a few players
   - Training summary Excel matches R output structure for direct comparison
 
 Run: python seasonal_model_training.py
@@ -30,7 +31,7 @@ import optuna
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import log_loss, roc_auc_score
+from sklearn.metrics import average_precision_score, log_loss, roc_auc_score
 from sklearn.model_selection import RepeatedStratifiedKFold, StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 
@@ -82,16 +83,18 @@ def _cv_log_loss(model, X: np.ndarray, y: np.ndarray, seed: int) -> float:
     return -float(scores.mean())
 
 
-def _cv_roc_auc(model, X: np.ndarray, y: np.ndarray, seed: int) -> float:
+def _cv_avg_precision(model, X: np.ndarray, y: np.ndarray, seed: int) -> float:
     """
-    ROC-AUC via cross-validation.
-    Used as the Optuna objective (returned negated so direction="minimize").
-    Unlike log-loss, AUC is not fooled by near-constant predictions on
-    severely imbalanced targets (e.g. Winner at 0.8% prevalence).
+    Average Precision (PR-AUC) via cross-validation, returned negated so
+    direction="minimize" in Optuna.
+    AP rewards placing actual positives at the very top of the ranked list —
+    directly aligned with back/lay betting where only a few players are acted on.
+    Baseline for a random model = prevalence (e.g. ~0.008 for Winner), so
+    absolute AP values will look small; a Winner AP of 0.05 is ~6× better than random.
     """
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
-    scores = cross_val_score(model, X, y, cv=cv, scoring="roc_auc", n_jobs=-1)
-    return -float(scores.mean())   # negate → minimise negative AUC
+    scores = cross_val_score(model, X, y, cv=cv, scoring="average_precision", n_jobs=-1)
+    return -float(scores.mean())   # negate → minimise negative AP
 
 
 def tune_logistic(X, y, n_trials, warm_params=None, seed=RANDOM_SEED):
@@ -102,7 +105,7 @@ def tune_logistic(X, y, n_trials, warm_params=None, seed=RANDOM_SEED):
             penalty="elasticnet", solver="saga", C=C, l1_ratio=l1_ratio,
             class_weight="balanced", max_iter=2000, random_state=seed,
         )
-        return _cv_roc_auc(model, X, y, seed)
+        return _cv_avg_precision(model, X, y, seed)
 
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
@@ -131,7 +134,7 @@ def tune_rf(X, y, n_trials, n_pos=None, warm_params=None, seed=RANDOM_SEED):
             n_jobs              = -1,
             random_state        = seed,
         )
-        return _cv_roc_auc(model, X, y, seed)
+        return _cv_avg_precision(model, X, y, seed)
 
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
@@ -159,7 +162,7 @@ def tune_lgbm(X, y, n_trials, n_pos=None, warm_params=None, seed=RANDOM_SEED):
             random_state        = seed,
             verbose             = -1,
         )
-        return _cv_roc_auc(model, X, y, seed)
+        return _cv_avg_precision(model, X, y, seed)
 
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
@@ -186,7 +189,7 @@ def tune_xgb(X, y, n_trials, scale_pos_weight, warm_params=None, seed=RANDOM_SEE
             random_state        = seed,
             verbosity           = 0,
         )
-        return _cv_roc_auc(model, X, y, seed)
+        return _cv_avg_precision(model, X, y, seed)
 
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
@@ -214,7 +217,7 @@ def tune_lgbm_dart(X, y, n_trials, n_pos=None, warm_params=None, seed=RANDOM_SEE
             random_state        = seed,
             verbose             = -1,
         )
-        return _cv_roc_auc(model, X, y, seed)
+        return _cv_avg_precision(model, X, y, seed)
 
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
@@ -377,9 +380,10 @@ def train_market(market_name, market_config, train_df, tour_key, model_vars):
         oof_j = np.clip(oof_matrix[:, j], 1e-15, 1 - 1e-15)
         ll  = log_loss(y, oof_j)
         auc = roc_auc_score(y, oof_j)
+        ap  = average_precision_score(y, oof_j)
         tss = tss_optimal(y, oof_j)
-        metrics[name] = {"log_loss": ll, "roc_auc": auc, "tss": tss}
-        print(f"      {name:12s}  log_loss={ll:.4f}  AUC={auc:.4f}  TSS={tss:.4f}")
+        metrics[name] = {"log_loss": ll, "roc_auc": auc, "avg_precision": ap, "tss": tss}
+        print(f"      {name:12s}  log_loss={ll:.4f}  AUC={auc:.4f}  AP={ap:.4f}  TSS={tss:.4f}")
 
     # --- Meta-model (calibration) ---
     implied_odds = 1.0 / np.clip(odds, 1e-8, None)
@@ -435,9 +439,10 @@ def save_summary(all_market_results: dict, tour_key: str):
                 "Tour":       tour_key,
                 "Market":     market_name,
                 "Model":      model_name,
-                "Log_Loss":   round(m["log_loss"], 5),
-                "ROC_AUC":    round(m["roc_auc"],  4),
-                "TSS":        round(m["tss"],       4),
+                "Log_Loss":       round(m["log_loss"],       5),
+                "ROC_AUC":        round(m["roc_auc"],        4),
+                "Avg_Precision":  round(m["avg_precision"],  4),
+                "TSS":            round(m["tss"],             4),
                 "N_Samples":  res["n_samples"],
                 "N_Positives": res["n_positives"],
             })
