@@ -184,11 +184,11 @@ def train_rd2(tour_key: str, tour_info: dict):
     print(f"  Tuning {RD2_OPTUNA_TRIALS} Optuna trials per model...")
 
     logistic_params = tune_logistic( X, y, RD2_OPTUNA_TRIALS, warm_params=load_warm("logistic"))
-    rf_params       = tune_rf(       X, y, RD2_OPTUNA_TRIALS, warm_params=load_warm("rf"))
-    lgbm_params     = tune_lgbm(     X, y, RD2_OPTUNA_TRIALS, warm_params=load_warm("lgbm"))
+    rf_params       = tune_rf(       X, y, RD2_OPTUNA_TRIALS, n_pos=n_pos, warm_params=load_warm("rf"))
+    lgbm_params     = tune_lgbm(     X, y, RD2_OPTUNA_TRIALS, n_pos=n_pos, warm_params=load_warm("lgbm"))
     xgb_params      = tune_xgb(      X, y, RD2_OPTUNA_TRIALS, scale_pos_weight=spw,
                                      warm_params=load_warm("xgb"))
-    dart_params     = tune_lgbm_dart(X, y, RD2_OPTUNA_TRIALS, warm_params=load_warm("lgbm_dart"))
+    dart_params     = tune_lgbm_dart(X, y, RD2_OPTUNA_TRIALS, n_pos=n_pos, warm_params=load_warm("lgbm_dart"))
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     for name, params in [("logistic", logistic_params), ("rf", rf_params),
