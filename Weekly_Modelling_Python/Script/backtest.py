@@ -108,7 +108,10 @@ def predict_event(event_df: pd.DataFrame, market_name: str,
     odds_col   = market_pkg["odds_col"]
 
     available = [v for v in model_vars if v in event_df.columns]
-    df = event_df[available + [odds_col]].dropna()
+    df = event_df[available + [odds_col]].copy()
+    for col in available + [odds_col]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna()
     if len(df) == 0:
         return None
 
