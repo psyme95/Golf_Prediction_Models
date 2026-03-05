@@ -108,11 +108,10 @@ def predict_event(event_df: pd.DataFrame, market_name: str,
     odds_col   = market_pkg["odds_col"]
 
     available = [v for v in model_vars if v in event_df.columns]
-    # odds_col may already appear in available (e.g. Win_odds is both a feature
-    # and the market odds column).  Deduplicate so df never has duplicate column
-    # names, which would cause df[odds_col] to return a DataFrame instead of a Series.
-    cols_unique = list(dict.fromkeys(available + [odds_col]))
-    df = event_df[cols_unique].dropna()
+    df = event_df[available + [odds_col]].copy()
+    for col in available + [odds_col]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna()
     if len(df) == 0:
         return None
 
