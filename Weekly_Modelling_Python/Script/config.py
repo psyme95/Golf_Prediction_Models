@@ -32,51 +32,69 @@ N_CV_SPLITS = 5      # folds for RepeatedStratifiedKFold OOF
 N_CV_REPEATS = 5     # repeats  → 25 OOF fits per model per market
 
 # ===== BETTING MARKETS =====
+# odds_col: used only for meta-model calibration (not as a base model feature)
 BETTING_MARKETS = {
     "Winner": {
         "target_col": "win",
         "odds_col": "Win_odds",
-        "model_odds_cols": ["Win_odds", "Top5_odds"],
         "market_size": 1,
     },
     "Top5": {
         "target_col": "top_5",
         "odds_col": "Top5_odds",
-        "model_odds_cols": ["Top5_odds", "Top10_odds"],
         "market_size": 5,
     },
     "Top10": {
         "target_col": "top_10",
         "odds_col": "Top10_odds",
-        "model_odds_cols": ["Top10_odds", "Top20_odds"],
         "market_size": 10,
     },
     "Top20": {
         "target_col": "top_20",
         "odds_col": "Top20_odds",
-        "model_odds_cols": ["Top20_odds"],
         "market_size": 20,
     },
 }
 
 # ===== BASE MODEL VARIABLES =====
-# Mirrors Seasonal_Model_Training.R base_model_vars
+# Odds columns are intentionally excluded — they enter only at the meta-model
+# calibration layer (via implied_odds), not as base model features.
 BASE_MODEL_VARS = [
+    # Rating vs field
     "rating_vs_field_best",
     "rating",
     "rating_vs_field_worst",
+    # Historical performance (multiple time windows)
     "yr3_All",
-    "Top5_rank",
-    "compat2",
-    "sgp_field_zscore",
-    "sgtee_field_zscore",
-    "course",
-    "sgatg_vs_field_median",
-    "sgapp_vs_field_median",
-    "Starts_Not10",
+    "X_1yr",
+    "X_6m",
+    "lastweek",
     "current",
+    # Finishing patterns
+    "Top5_rank",
+    "Starts_Not10",
+    # Compatibility
+    "compat",
+    "compat2",
+    # Course / Location
+    "course",
+    "course_top5",
+    "course_top20",
     "location",
+    "location_top5",
+    "location_top20",
+    # Field context
     "field",
+    "field_strength",
+    "field_depth",
+    # Strokes Gained vs field (z-score is the canonical field-relative representation)
+    "sgtee_field_zscore",
+    "sgt2g_field_zscore",
+    "sgapp_field_zscore",
+    "sgatg_vs_field_median",
+    "sgp_field_zscore",
+    "sg_ball_striking_field_zscore",
+    "sg_short_game_field_zscore",
 ]
 
 # ===== RD2 MODEL VARIABLES =====

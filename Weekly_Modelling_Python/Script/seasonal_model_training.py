@@ -423,10 +423,10 @@ def get_training_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_market_vars(market_config: dict) -> list:
-    """Base vars (no generic odds) + market-specific odds columns."""
+    """Base vars only — market odds are excluded from base model features.
+    Odds are used solely in the meta-model for calibration (via implied_odds)."""
     odds_cols = {"Win_odds", "Top5_odds", "Top10_odds", "Top20_odds"}
-    base_no_odds = [v for v in BASE_MODEL_VARS if v not in odds_cols]
-    return base_no_odds + market_config["model_odds_cols"]
+    return [v for v in BASE_MODEL_VARS if v not in odds_cols]
 
 
 # ===== SAVE TRAINING SUMMARY =====
