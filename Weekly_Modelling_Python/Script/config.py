@@ -63,7 +63,6 @@ BASE_MODEL_VARS = [
     # Rating vs field
     "rating_vs_field_best",
     "rating",
-    "rating_vs_field_worst",
     # Historical performance (multiple time windows)
     "yr3_All",
     "X_1yr",
