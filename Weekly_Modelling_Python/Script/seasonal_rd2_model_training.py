@@ -240,8 +240,7 @@ def train_rd2(tour_key: str, tour_info: dict):
         metrics[name] = {"log_loss": ll, "roc_auc": auc, "tss": tss}
         print(f"    {name:12s}  log_loss={ll:.4f}  AUC={auc:.4f}  TSS={tss:.4f}")
 
-    implied_odds = 1.0 / np.clip(odds, 1e-8, None)
-    meta_model, meta_scaler = fit_meta_model(oof_matrix, y, implied_odds)
+    meta_model, meta_scaler = fit_meta_model(oof_matrix, y)
 
     print("  Fitting final models on full training data...")
     final_models = build_final_models(model_configs, X, y)

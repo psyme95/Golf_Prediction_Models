@@ -96,10 +96,8 @@ def predict_rd2(df: pd.DataFrame, model_pkg: dict) -> pd.DataFrame:
     ])
     raw_score = model_preds.mean(axis=1)
 
-    # Meta-model calibration (OOF-trained, uses individual preds + implied odds)
-    implied_odds = 1.0 / np.clip(odds, 1e-8, None)
-    meta_X = np.column_stack([model_preds, implied_odds])
-    meta_X_scaled = model_pkg["meta_scaler"].transform(meta_X)
+    # Meta-model calibration (OOF-trained, skill signals only)
+    meta_X_scaled = model_pkg["meta_scaler"].transform(model_preds)
     calibrated_prob = model_pkg["meta_model"].predict_proba(meta_X_scaled)[:, 1]
 
     # Tournament-level normalisation (win market: probabilities sum to 1)

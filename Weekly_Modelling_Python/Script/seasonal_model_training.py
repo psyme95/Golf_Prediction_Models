@@ -272,12 +272,13 @@ def build_final_models(model_configs: dict, X: np.ndarray, y: np.ndarray) -> dic
 
 # ===== META-MODEL (calibration + weighting) =====
 
-def fit_meta_model(oof_matrix, y, implied_odds, seed=RANDOM_SEED):
+def fit_meta_model(oof_matrix, y, seed=RANDOM_SEED):
     """
-    LogisticRegression on [oof_model1..N, implied_odds].
-    Simultaneously learns ensemble weights and calibrates probabilities.
+    LogisticRegression on OOF predictions only.
+    Learns ensemble weights and calibrates probabilities using player-skill
+    signals exclusively — market odds are intentionally excluded.
     """
-    meta_X = np.column_stack([oof_matrix, implied_odds])
+    meta_X = oof_matrix
     scaler = StandardScaler()
     meta_X_scaled = scaler.fit_transform(meta_X)
     meta = LogisticRegression(C=1.0, max_iter=2000, random_state=seed)
@@ -386,8 +387,7 @@ def train_market(market_name, market_config, train_df, tour_key, model_vars):
         print(f"      {name:12s}  log_loss={ll:.4f}  AUC={auc:.4f}  AP={ap:.4f}  TSS={tss:.4f}")
 
     # --- Meta-model (calibration) ---
-    implied_odds = 1.0 / np.clip(odds, 1e-8, None)
-    meta_model, meta_scaler = fit_meta_model(oof_matrix, y, implied_odds)
+    meta_model, meta_scaler = fit_meta_model(oof_matrix, y)
 
     # --- Final models on full data ---
     print("    Fitting final models on full training data...")

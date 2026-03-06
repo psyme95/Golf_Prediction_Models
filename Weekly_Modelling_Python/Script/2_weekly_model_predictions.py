@@ -52,9 +52,7 @@ def ensemble_predict(market_pkg: dict, X: np.ndarray, odds: np.ndarray) -> np.nd
         model.predict_proba(X)[:, 1]
         for model in market_pkg["models"].values()
     ])
-    implied_odds = 1.0 / np.clip(odds, 1e-8, None)
-    meta_X = np.column_stack([model_preds, implied_odds])
-    meta_X_scaled = market_pkg["meta_scaler"].transform(meta_X)
+    meta_X_scaled = market_pkg["meta_scaler"].transform(model_preds)
     return (
         market_pkg["meta_model"].predict_proba(meta_X_scaled)[:, 1],
         model_preds.mean(axis=1),   # raw model score (mean of individual model probs)
