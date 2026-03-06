@@ -27,10 +27,10 @@ BANKROLL     = 2000
 KELLY_FRAC   = 0.25
 
 # Grid dimensions
-EDGE_THRESHOLDS = [1.0, 1.25, 1.5, 2.0, 3.0, 5.0]
+EDGE_THRESHOLDS = [1.0, 1.05, 1.1, 1.25, 1.5, 2.0, 3.0, 5.0]
 MIN_ODDS        = [1.0, 3.0, 5.0, 10.0]
-MAX_ODDS        = [9999, 50, 100, 200, 500]   # 9999 = no cap
-MIN_RATING      = [None, 50, 55, 60]           # None = no filter
+MAX_ODDS        = [9999, 10, 25, 50, 100, 200, 500]   # 9999 = no cap
+MIN_RATING      = [None, 50, 55, 60, 65, 70]           # None = no filter
 MARKETS         = ["Winner", "Top5", "Top10", "Top20"]
 STAKING_METHODS = ["FIXED"]
 
@@ -127,7 +127,6 @@ for i, (mkt, edge, mn_o, mx_o, mn_r, stk) in enumerate(combos):
     if metrics:
         results.append({
             "Market":         mkt,
-            "Staking":        stk,
             "Edge_Threshold": edge,
             "Min_Odds":       mn_o,
             "Max_Odds":       mx_o if mx_o < 9999 else "None",
@@ -168,23 +167,6 @@ NEG_FILL  = PatternFill("solid", start_color="FFC7CE")
 MID_FILL  = PatternFill("solid", start_color="FFEB9C")
 META_FILL = PatternFill("solid", start_color="D9E1F2")
 
-# Title row
-ws.merge_cells("A1:O1")
-ws["A1"] = "PGA Back Betting Strategy Grid Search"
-ws["A1"].font = Font(name="Arial", bold=True, size=14, color="1F4E79")
-ws["A1"].fill = META_FILL
-ws["A1"].alignment = center
-ws.row_dimensions[1].height = 22
-
-# Parameters row
-ws.merge_cells("A2:O2")
-ws["A2"] = (f"FIXED stake = £{FIXED_STAKE}  |  Kelly bankroll = £{BANKROLL:,} @ {KELLY_FRAC} fraction  |  "
-            f"{len(results_df):,} combinations  |  "
-            f"{n_profitable:,} profitable ({100*n_profitable/len(results_df):.1f}%)  |  Sorted by ROI%")
-ws["A2"].font = Font(name="Arial", italic=True, size=9, color="595959")
-ws["A2"].fill = META_FILL
-ws.row_dimensions[3].height = 6  # spacer
-
 # Column headers (row 4)
 cols = list(results_df.columns)
 for col_idx, col_name in enumerate(cols, 1):
@@ -193,7 +175,7 @@ for col_idx, col_name in enumerate(cols, 1):
     cell.fill = HDR_FILL
     cell.alignment = center
     cell.border = std_border
-ws.row_dimensions[4].height = 18
+ws.row_dimensions[1].height = 18
 
 # Data rows
 pnl_col_idx = cols.index("Total_PnL") + 1
@@ -226,40 +208,6 @@ for col_idx, col_name in enumerate(cols, 1):
     ws.column_dimensions[get_column_letter(col_idx)].width = widths.get(col_name, 12)
 
 ws.freeze_panes = "A5"
-
-# ── Top 10 summary panel ──────────────────────────────────────────────────────
-SC = len(cols) + 2  # summary start column
-SCOLS = ["Rank","Market","Staking","Edge_Threshold","Min_Odds","Max_Odds",
-         "Min_Rating","N_Bets","ROI_%","Total_PnL","Sharpe","Max_Drawdown"]
-
-ws.cell(row=1, column=SC).value = "Top 10 Strategies by ROI%"
-ws.cell(row=1, column=SC).font = Font(name="Arial", bold=True, size=12, color="1F4E79")
-ws.cell(row=1, column=SC).fill = META_FILL
-
-for c_idx, h in enumerate(SCOLS, SC):
-    cell = ws.cell(row=4, column=c_idx, value=h)
-    cell.font = HDR_FONT
-    cell.fill = HDR_FILL
-    cell.alignment = center
-    cell.border = std_border
-    ws.column_dimensions[get_column_letter(c_idx)].width = 15
-
-for rank, (_, row) in enumerate(results_df.head(10).iterrows(), 1):
-    r = 4 + rank
-    vals = [rank, row["Market"], row["Staking"], row["Edge_Threshold"],
-            row["Min_Odds"], row["Max_Odds"], row["Min_Rating"],
-            row["N_Bets"], row["ROI_%"], row["Total_PnL"],
-            row["Sharpe"], row["Max_Drawdown"]]
-    for c_idx, v in enumerate(vals, SC):
-        cell = ws.cell(row=r, column=c_idx, value=v)
-        cell.font = BODY_FONT
-        cell.border = std_border
-        cell.alignment = center
-
-    roi_c = SC + SCOLS.index("ROI_%")
-    pnl_c = SC + SCOLS.index("Total_PnL")
-    ws.cell(row=r, column=roi_c).fill = POS_FILL if row["ROI_%"] > 0 else NEG_FILL
-    ws.cell(row=r, column=pnl_c).fill = POS_FILL if row["Total_PnL"] > 0 else NEG_FILL
 
 wb.save(INPUT_FILE)
 print(f"Done. Open {INPUT_FILE} and navigate to the '{OUTPUT_SHEET}' sheet.")
