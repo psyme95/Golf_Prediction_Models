@@ -32,29 +32,26 @@ N_CV_SPLITS = 5      # folds for RepeatedStratifiedKFold OOF
 N_CV_REPEATS = 5     # repeats  → 25 OOF fits per model per market
 
 # ===== BETTING MARKETS =====
+# odds_col: used only for meta-model calibration (not as a base model feature)
 BETTING_MARKETS = {
     "Winner": {
         "target_col": "win",
         "odds_col": "Win_odds",
-        "model_odds_cols": ["Win_odds", "Top5_odds"],
         "market_size": 1,
     },
     "Top5": {
         "target_col": "top_5",
         "odds_col": "Top5_odds",
-        "model_odds_cols": ["Top5_odds", "Top10_odds"],
         "market_size": 5,
     },
     "Top10": {
         "target_col": "top_10",
         "odds_col": "Top10_odds",
-        "model_odds_cols": ["Top10_odds", "Top20_odds"],
         "market_size": 10,
     },
     "Top20": {
         "target_col": "top_20",
         "odds_col": "Top20_odds",
-        "model_odds_cols": ["Top20_odds"],
         "market_size": 20,
     },
 }

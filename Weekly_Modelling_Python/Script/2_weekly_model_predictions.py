@@ -39,8 +39,7 @@ warnings.filterwarnings("ignore")
 
 def get_market_vars(market_config: dict) -> list:
     odds_cols = {"Win_odds", "Top5_odds", "Top10_odds", "Top20_odds"}
-    base_no_odds = [v for v in BASE_MODEL_VARS if v not in odds_cols]
-    return base_no_odds + market_config["model_odds_cols"]
+    return [v for v in BASE_MODEL_VARS if v not in odds_cols]
 
 
 def ensemble_predict(market_pkg: dict, X: np.ndarray, odds: np.ndarray) -> np.ndarray:
