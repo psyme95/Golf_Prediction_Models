@@ -12,7 +12,10 @@ Path conventions:
 from pathlib import Path
 
 # ===== PATHS =====
-SCRIPT_DIR = Path(__file__).parent
+try:
+    SCRIPT_DIR = Path(__file__).parent
+except NameError:  # running interactively (IPython / Jupyter) — assume CWD is the Script dir
+    SCRIPT_DIR = Path.cwd()
 BASE_DIR = SCRIPT_DIR.parent                                        # Weekly_Modelling_Python/
 SHARED_INPUT_DIR = BASE_DIR.parent / "Weekly_Modelling" / "Input"  # Raw data shared with R
 INPUT_DIR = BASE_DIR / "Input"                                      # Python-processed data
