@@ -38,7 +38,10 @@ from sklearn.preprocessing import StandardScaler
 import lightgbm as lgb
 import xgboost as xgb
 
-sys.path.insert(0, str(Path(__file__).parent))
+try:
+    sys.path.insert(0, str(Path(__file__).parent))
+except NameError:  # IPython / Jupyter — assume CWD is the Script dir
+    sys.path.insert(0, str(Path.cwd()))
 from config import (
     BASE_MODEL_VARS,
     BETTING_MARKETS,
