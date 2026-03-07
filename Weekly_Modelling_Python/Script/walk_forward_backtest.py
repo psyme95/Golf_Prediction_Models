@@ -81,8 +81,13 @@ from sklearn.metrics import (
 
 try:
     sys.path.insert(0, str(Path(__file__).parent))
-except NameError:  # IPython / Jupyter — assume CWD is the Script dir
-    sys.path.insert(0, str(Path.cwd()))
+except NameError:
+    # IPython/Jupyter or PyCharm console: __file__ is unavailable.
+    # Search common locations relative to CWD (project root, Weekly_Modelling_Python, or Script).
+    _cwd = Path.cwd()
+    _candidates = [_cwd, _cwd / "Weekly_Modelling_Python" / "Script", _cwd / "Script"]
+    _script_dir = next((p for p in _candidates if (p / "seasonal_model_training.py").exists()), _cwd)
+    sys.path.insert(0, str(_script_dir))
 
 # Import seasonal_model_training as a module so we can monkey-patch
 # OPTUNA_TRIALS and MODELS_DIR per window without touching other state.

@@ -14,8 +14,12 @@ from pathlib import Path
 # ===== PATHS =====
 try:
     SCRIPT_DIR = Path(__file__).parent
-except NameError:  # running interactively (IPython / Jupyter) — assume CWD is the Script dir
-    SCRIPT_DIR = Path.cwd()
+except NameError:
+    # IPython/Jupyter or PyCharm console: __file__ is unavailable.
+    # Search common locations relative to CWD (project root, Weekly_Modelling_Python, or Script).
+    _cwd = Path.cwd()
+    _candidates = [_cwd, _cwd / "Weekly_Modelling_Python" / "Script", _cwd / "Script"]
+    SCRIPT_DIR = next((p for p in _candidates if (p / "config.py").exists()), _cwd)
 BASE_DIR = SCRIPT_DIR.parent                                        # Weekly_Modelling_Python/
 SHARED_INPUT_DIR = BASE_DIR.parent / "Weekly_Modelling" / "Input"  # Raw data shared with R
 INPUT_DIR = BASE_DIR / "Input"                                      # Python-processed data
