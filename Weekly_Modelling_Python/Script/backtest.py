@@ -9,34 +9,25 @@ events are a clean out-of-sample test.
 For each event the script:
   1. Extracts the field (all players in that event from the processed data)
   2. Applies the trained model exactly as the weekly prediction script does
-  3. Compares predictions against actual outcomes across three betting strategies
+  3. Compares predictions against actual outcomes for the back betting strategy
 
-Betting strategies
-------------------
-Back only
-  Bet when Normalised_Model_Odds < Market_Odds (model thinks player underpriced).
-  Fixed stake: £10. P&L = (market_odds - 1) × 10 on win, -10 on loss.
-  ROI = total_P&L / (n_bets × 10)
+Back betting strategy
+---------------------
+Bet when Normalised_Model_Odds < Market_Odds (model thinks player underpriced).
+Fixed stake: £10.
 
-Lay only
-  Bet when Normalised_Model_Odds > Market_Odds (model thinks player overpriced).
-  Lay odds = 1.2 × market_back_odds.
-  Liability per bet = £1000 / market_size:
-    Winner £1000 | Top5 £200 | Top10 £100 | Top20 £50
-  Maximum possible loss per event per market = £1000 (at most market_size
-  players can finish in-the-money, each costing exactly liability_per_bet).
-  Stake = liability / (lay_odds - 1).
-  P&L = +stake if player does NOT finish in market, -liability if they do.
-  ROI = total_P&L / total_liability_fronted
+  Winner market: P&L = (market_odds - 1) × 10 on win, -10 on loss.
+  Top5/Top10/Top20: P&L taken directly from the pre-computed profit column
+    (Top5_Profit / Top10_Profit / Top20_Profit) which incorporates dead heat
+    rules and is based on a £10 stake.
 
-Combination
-  Both strategies applied simultaneously. Reports absolute £ P&L only.
+ROI = total_P&L / (n_bets × 10)
 
 Model quality metrics: AUC, Average Precision, TSS, Log-loss, Brier score
 
 Output Excel (one per tour):
-  Summary          — model metrics + all three strategy results by market
-  Event_Results    — per-event P&L with running cumulative columns
+  Summary          — model metrics + back strategy results by market
+  Event_Results    — per-event P&L with running cumulative column
   All_Predictions  — every player prediction + outcome + per-bet P&L
   Calibration      — binned predicted vs actual rates for calibration plots
 
@@ -48,7 +39,6 @@ Run: python backtest.py
 import argparse
 import sys
 import warnings
-from datetime import datetime
 from pathlib import Path
 
 import joblib
@@ -77,9 +67,7 @@ warnings.filterwarnings("ignore")
 
 
 # ===== BETTING CONSTANTS =====
-BACK_STAKE          = 10.0     # £ per back bet
-LAY_TOTAL_LIABILITY = 1000.0   # £ max possible loss per market per event
-LAY_ODDS_MULTIPLIER = 1.2      # exchange spread on lay side
+BACK_STAKE = 10.0     # £ per back bet
 
 
 # ===== ARGS =====
@@ -98,6 +86,43 @@ def get_backtest_year(df: pd.DataFrame) -> int:
     if (df["Date"].dt.year == max_year).sum() > 0:
         return max_year
     return max_year - 1
+
+
+# ===== PROFIT COLUMN JOIN =====
+
+PROFIT_COLS    = ["Top5_Profit", "Top10_Profit", "Top20_Profit"]
+PROFIT_JOIN_ON = ["eventID", "surname", "firstname"]
+
+
+def join_profit_cols(df: pd.DataFrame, profit_file: Path) -> pd.DataFrame:
+    """
+    Left join Top5/10/20_Profit onto df from the raw profit_file.
+
+    Rows with missing odds in the source will have NaN in the profit columns;
+    apply_back_strategy falls back to the formula for those rows.
+    Returns df unchanged if the file is missing or contains no usable columns.
+    """
+    if profit_file is None or not profit_file.exists():
+        return df
+
+    try:
+        available_join = [c for c in PROFIT_JOIN_ON if c in df.columns]
+        if not available_join:
+            return df
+
+        raw = pd.read_excel(profit_file, usecols=available_join + PROFIT_COLS)
+        raw = raw.dropna(subset=available_join)
+
+        # Drop any profit cols already present in df to avoid _x/_y conflicts
+        existing = [c for c in PROFIT_COLS if c in df.columns]
+        if existing:
+            df = df.drop(columns=existing)
+
+        df = df.merge(raw[available_join + PROFIT_COLS], on=available_join, how="left")
+    except Exception as e:
+        print(f"  Warning: could not join profit columns from {profit_file.name}: {e}")
+
+    return df
 
 
 # ===== PREDICTION (mirrors 2_weekly_model_predictions.py) =====
@@ -138,60 +163,42 @@ def predict_event(event_df: pd.DataFrame, market_name: str,
     return result
 
 
-# ===== BETTING STRATEGIES =====
+# ===== BACK BETTING STRATEGY =====
 
 def apply_back_strategy(df: pd.DataFrame, odds_col: str,
-                        target_col: str) -> pd.DataFrame:
+                        target_col: str,
+                        profit_col: str | None = None) -> pd.DataFrame:
     """
     Back when Normalised_Model_Odds < Market_Odds.
     Fixed stake BACK_STAKE per bet.
+
+    P&L source:
+      - If profit_col is provided and present in df: use it directly (incorporates
+        dead heat rules and is based on BACK_STAKE already).
+      - Otherwise: compute from market odds (no dead heat adjustment).
     """
     df = df.copy()
     mkt    = df[odds_col].to_numpy(dtype=float)
     actual = df[target_col].to_numpy(dtype=float)
     model  = df["Normalised_Model_Odds"].to_numpy(dtype=float)
     is_back = model < mkt
-    is_win  = actual == 1
+
+    if profit_col and profit_col in df.columns:
+        # Pre-computed P&L already has dead heat adjustments baked in
+        precomputed = df[profit_col].to_numpy(dtype=float)
+        back_pnl = np.where(is_back, precomputed, 0.0)
+    else:
+        back_pnl = np.where(
+            is_back & (actual == 1),  (mkt - 1) * BACK_STAKE,
+            np.where(is_back, -BACK_STAKE, 0.0)
+        )
+
     df["Back_Bet"] = is_back
-    df["Back_PnL"] = np.where(
-        is_back & is_win,  (mkt - 1) * BACK_STAKE,
-        np.where(is_back, -BACK_STAKE, 0.0)
-    )
+    df["Back_PnL"] = back_pnl
     return df
 
 
-def apply_lay_strategy(df: pd.DataFrame, odds_col: str,
-                       target_col: str, market_size: int) -> pd.DataFrame:
-    """
-    Lay when Normalised_Model_Odds > Market_Odds.
-    Lay odds = LAY_ODDS_MULTIPLIER × market_back_odds.
-    Liability per bet = LAY_TOTAL_LIABILITY / market_size.
-    Stake = liability / (lay_odds - 1).
-    P&L = +stake if player misses market, -liability if player hits market.
-
-    Maximum total loss per event = market_size × liability_per_bet
-                                  = LAY_TOTAL_LIABILITY (£1000).
-    """
-    df = df.copy()
-    mkt    = df[odds_col].to_numpy(dtype=float)
-    actual = df[target_col].to_numpy(dtype=float)
-    model  = df["Normalised_Model_Odds"].to_numpy(dtype=float)
-    liability_per_bet = LAY_TOTAL_LIABILITY / market_size
-    lay_odds  = LAY_ODDS_MULTIPLIER * mkt
-    lay_stake = liability_per_bet / np.maximum(lay_odds - 1, 1e-8)
-    is_lay = model > mkt
-    is_win = actual == 1
-    df["Lay_Bet"]       = is_lay
-    df["Lay_Liability"] = np.where(is_lay, liability_per_bet, 0.0)
-    df["Lay_Stake"]     = np.round(np.where(is_lay, lay_stake, 0.0), 4)
-    df["Lay_PnL"]       = np.where(
-        is_lay & ~is_win, np.where(is_lay, lay_stake, 0.0),
-        np.where(is_lay & is_win, -liability_per_bet, 0.0)
-    )
-    return df
-
-
-# ===== STRATEGY SUMMARY HELPERS =====
+# ===== STRATEGY SUMMARY =====
 
 def back_summary(df: pd.DataFrame, target_col: str) -> dict:
     bets = df[df["Back_Bet"]]
@@ -202,28 +209,11 @@ def back_summary(df: pd.DataFrame, target_col: str) -> dict:
     n_won  = int(bets[target_col].sum())
     pnl    = float(bets["Back_PnL"].sum())
     return {
-        "Back_NBets":    n_bets,
-        "Back_NWon":     n_won,
-        "Back_HitRate":  round(n_won / n_bets, 4),
-        "Back_PnL":      round(pnl, 2),
-        "Back_ROI":      round(pnl / (n_bets * BACK_STAKE), 4),
-    }
-
-
-def lay_summary(df: pd.DataFrame, target_col: str) -> dict:
-    bets = df[df["Lay_Bet"]]
-    if len(bets) == 0:
-        return {"Lay_NBets": 0, "Lay_NLost": 0, "Lay_PnL": 0.0,
-                "Lay_ROI_On_Liability": np.nan}
-    n_bets        = len(bets)
-    n_lost        = int(bets[target_col].sum())   # player hit market = lay loss
-    pnl           = float(bets["Lay_PnL"].sum())
-    total_liab    = float(bets["Lay_Liability"].sum())
-    return {
-        "Lay_NBets":           n_bets,
-        "Lay_NLost":           n_lost,   # number of lay bets that lost
-        "Lay_PnL":             round(pnl, 2),
-        "Lay_ROI_On_Liability": round(pnl / total_liab, 4) if total_liab > 0 else np.nan,
+        "Back_NBets":   n_bets,
+        "Back_NWon":    n_won,
+        "Back_HitRate": round(n_won / n_bets, 4),
+        "Back_PnL":     round(pnl, 2),
+        "Back_ROI":     round(pnl / (n_bets * BACK_STAKE), 4),
     }
 
 
@@ -278,6 +268,7 @@ def run_backtest(tour_key: str, tour_info: dict, backtest_year: int):
 
     df      = pd.read_excel(hist_path)
     df["Date"] = pd.to_datetime(df["Date"])
+    df = join_profit_cols(df, tour_info.get("profit_file"))
     package = joblib.load(model_path)
 
     backtest_df = df[df["Date"].dt.year == backtest_year].copy()
@@ -298,7 +289,7 @@ def run_backtest(tour_key: str, tour_info: dict, backtest_year: int):
             market_config = BETTING_MARKETS[market_name]
             target_col    = market_config["target_col"]
             odds_col      = market_config["odds_col"]
-            market_size   = market_config["market_size"]
+            profit_col    = market_config["profit_col"]
 
             if target_col not in event_df.columns:
                 continue
@@ -308,17 +299,9 @@ def run_backtest(tour_key: str, tour_info: dict, backtest_year: int):
                 continue
 
             preds["Actual"] = preds[target_col].astype(int)
+            preds = apply_back_strategy(preds, odds_col, target_col, profit_col)
 
-            # Apply both strategies
-            preds = apply_back_strategy(preds, odds_col, target_col)
-            preds = apply_lay_strategy( preds, odds_col, target_col, market_size)
-
-            # Combination P&L
-            preds["Combo_PnL"] = preds["Back_PnL"] + preds["Lay_PnL"]
-
-            # Per-event summary
             bs = back_summary(preds, target_col)
-            ls = lay_summary( preds, target_col)
             event_summaries.append({
                 "Tour":      tour_key,
                 "EventID":   event_id,
@@ -327,8 +310,6 @@ def run_backtest(tour_key: str, tour_info: dict, backtest_year: int):
                 "FieldSize": len(preds),
                 "Positives": int(preds["Actual"].sum()),
                 **bs,
-                **ls,
-                "Combo_PnL": round(float(preds["Combo_PnL"].sum()), 2),
             })
 
             preds["Tour"]    = tour_key
@@ -346,21 +327,16 @@ def run_backtest(tour_key: str, tour_info: dict, backtest_year: int):
     # Cumulative P&L per market, sorted by date
     for market_name in event_sum_df["Market"].unique():
         mask = event_sum_df["Market"] == market_name
-        for col, cum_col in [("Back_PnL",  "Back_Cumulative_PnL"),
-                              ("Lay_PnL",   "Lay_Cumulative_PnL"),
-                              ("Combo_PnL", "Combo_Cumulative_PnL")]:
-            event_sum_df.loc[mask, cum_col] = (
-                event_sum_df.loc[mask, col].cumsum().round(2)
-            )
+        event_sum_df.loc[mask, "Back_Cumulative_PnL"] = (
+            event_sum_df.loc[mask, "Back_PnL"].cumsum().round(2)
+        )
 
     # ===== AGGREGATE METRICS =====
     summary_rows = []
     calib_sheets = {}
 
     for market_name, market_config in BETTING_MARKETS.items():
-        target_col  = market_config["target_col"]
-        odds_col    = market_config["odds_col"]
-        market_size = market_config["market_size"]
+        target_col = market_config["target_col"]
 
         mdf = pred_df[pred_df["Market"] == market_name]
         if len(mdf) == 0 or target_col not in mdf.columns:
@@ -369,25 +345,18 @@ def run_backtest(tour_key: str, tour_info: dict, backtest_year: int):
         y_true = mdf["Actual"].values
         y_prob = mdf["Normalised_Probability"].values
 
-        disc  = compute_discrimination(y_true, y_prob)
-        bs    = back_summary(mdf, target_col)
-        ls    = lay_summary( mdf, target_col)
-        combo = round(float(mdf["Combo_PnL"].sum()), 2)
+        disc = compute_discrimination(y_true, y_prob)
+        bs   = back_summary(mdf, target_col)
         calib_sheets[market_name] = calibration_bins(y_true, y_prob)
 
         n_events   = int(mdf["EventID"].nunique())
         prevalence = round(float(y_true.mean()), 4)
-        liability  = LAY_TOTAL_LIABILITY / market_size
 
-        print(f"\n  {market_name} ({n_events} events, prevalence={prevalence:.1%}, "
-              f"lay liability/bet=£{liability:.0f})")
+        print(f"\n  {market_name} ({n_events} events, prevalence={prevalence:.1%})")
         print(f"    Model:  AUC={disc['AUC']:.4f}  AP={disc['Avg_Precision']:.4f}  "
               f"TSS={disc['TSS']:.4f}  log_loss={disc['Log_Loss']:.4f}")
         print(f"    Back:   {bs['Back_NBets']} bets  won={bs['Back_NWon']}  "
               f"P&L=£{bs['Back_PnL']:.2f}  ROI={bs['Back_ROI']:.1%}")
-        print(f"    Lay:    {ls['Lay_NBets']} bets  lost={ls['Lay_NLost']}  "
-              f"P&L=£{ls['Lay_PnL']:.2f}  ROI={ls['Lay_ROI_On_Liability']:.1%}")
-        print(f"    Combo:  P&L=£{combo:.2f}")
 
         summary_rows.append({
             "Tour":        tour_key,
@@ -399,8 +368,6 @@ def run_backtest(tour_key: str, tour_info: dict, backtest_year: int):
             "AP_Baseline": prevalence,
             **disc,
             **bs,
-            **ls,
-            "Combo_PnL":   combo,
         })
 
     return {
@@ -417,16 +384,13 @@ def export_results(results: dict, tour_key: str, backtest_year: int):
     PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = PREDICTIONS_DIR / f"{tour_key}_Backtest_{backtest_year}.xlsx"
 
-    # All_Predictions column order
     id_cols   = [c for c in ["Date", "EventID", "Market", "surname", "firstname",
                               "posn", "rating"] if c in results["all_predictions"].columns]
     odds_cols = [c for c in ["Win_odds", "Top5_odds", "Top10_odds", "Top20_odds"]
                  if c in results["all_predictions"].columns]
     pred_cols = ["Model_Score", "Probability", "Normalised_Probability",
                  "Normalised_Model_Odds", "Actual"]
-    bet_cols  = ["Back_Bet", "Back_PnL",
-                 "Lay_Bet", "Lay_Stake", "Lay_Liability", "Lay_PnL",
-                 "Combo_PnL"]
+    bet_cols  = ["Back_Bet", "Back_PnL"]
     all_cols  = id_cols + odds_cols + pred_cols + bet_cols
     export_df = results["all_predictions"][
         [c for c in all_cols if c in results["all_predictions"].columns]
@@ -449,8 +413,7 @@ def main():
     args = parse_args()
     print("=== GOLF MODEL BACKTESTING ===")
     print(f"Season: {SEASON_SUFFIX}  |  Training years: {TRAINING_YEARS}")
-    print(f"Back stake: £{BACK_STAKE}  |  Lay total liability: £{LAY_TOTAL_LIABILITY}  "
-          f"|  Lay odds multiplier: {LAY_ODDS_MULTIPLIER}×")
+    print(f"Back stake: £{BACK_STAKE}  |  Place markets use pre-computed dead-heat P&L")
 
     tours_to_run = {k: v for k, v in TOUR_CONFIG.items()
                     if args.tour is None or k == args.tour}

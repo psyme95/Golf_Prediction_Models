@@ -26,14 +26,30 @@ Default is 30 trials per model per market (vs 75 in production) to keep runtimes
 manageable across many windows. Use --trials 75 for full production quality.
 Warm-start: best params from window N are passed as starting suggestions to window N+1.
 
+Back betting
+------------
+Bet when Normalised_Model_Odds < Market_Odds (fixed £10 stake).
+  Winner:          P&L = (market_odds - 1) × 10 on win, -10 on loss.
+  Top5/Top10/Top20: P&L from pre-computed profit column (dead-heat adjusted).
+
+Grid search
+-----------
+After all windows are processed a parameter grid is swept over the combined
+All_Predictions data. Dimensions:
+  Edge threshold  — ratio of market odds to model odds required before betting
+  Min/Max odds    — odds range filter
+  Min rating      — player rating floor filter
+Results are written to the Strategy_Grid sheet of the output workbook.
+
 Output
 ------
 Output/WalkForward/Results/{tour}_WalkForward_Backtest.xlsx
-  Summary         — overall metrics + P&L across all windows, per market
+  Summary         — overall metrics + back P&L across all windows, per market
   Season_Summary  — same broken down by test year
-  Event_Results   — per-event P&L with cumulative P&L columns
+  Event_Results   — per-event P&L with cumulative P&L column
   All_Predictions — every player prediction + outcome + bet P&L
   Calib_*         — calibration bins (predicted vs actual) per market
+  Strategy_Grid   — grid search results sorted by ROI
 
 Run:
   python walk_forward_backtest.py                         # both tours, all windows, 30 trials
@@ -47,11 +63,15 @@ import argparse
 import shutil
 import sys
 import warnings
+from itertools import product
 from pathlib import Path
 
 import joblib
 import numpy as np
 import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 from sklearn.metrics import (
     average_precision_score,
     brier_score_loss,
@@ -74,14 +94,11 @@ from config import (
 )
 from backtest import (
     BACK_STAKE,
-    LAY_ODDS_MULTIPLIER,
-    LAY_TOTAL_LIABILITY,
     apply_back_strategy,
-    apply_lay_strategy,
     back_summary,
     calibration_bins,
     compute_discrimination,
-    lay_summary,
+    join_profit_cols,
     predict_event,
 )
 from seasonal_model_training import get_market_vars, tss_optimal
@@ -89,13 +106,19 @@ from seasonal_model_training import get_market_vars, tss_optimal
 warnings.filterwarnings("ignore")
 
 # ===== PATHS =====
-WF_DIR        = BASE_DIR / "Output" / "WalkForward"
-WF_MODELS_DIR = WF_DIR / "Models"
+WF_DIR         = BASE_DIR / "Output" / "WalkForward"
+WF_MODELS_DIR  = WF_DIR / "Models"
 WF_RESULTS_DIR = WF_DIR / "Results"
 
 # ===== CONSTANTS =====
 DEFAULT_WF_TRIALS = 30
 MIN_POSITIVES     = 10   # skip a market window if training set has fewer positives
+
+# ===== GRID SEARCH PARAMETERS =====
+GRID_EDGE_THRESHOLDS = [1.0, 1.05, 1.1, 1.25, 1.5, 2.0, 3.0, 5.0]
+GRID_MIN_ODDS        = [1.0, 3.0, 5.0, 10.0]
+GRID_MAX_ODDS        = [9999, 10, 25, 50, 100, 200, 500]   # 9999 = no cap
+GRID_MIN_RATING      = [None, 50, 55, 60, 65, 70]           # None = no filter
 
 
 # ===== CLI =====
@@ -163,7 +186,7 @@ def train_window(tour_key: str, train_df: pd.DataFrame, test_year: int,
                 shutil.copy(f, dest)
 
     # Temporarily redirect module constants so train_market uses our settings
-    orig_trials    = smt.OPTUNA_TRIALS
+    orig_trials     = smt.OPTUNA_TRIALS
     orig_models_dir = smt.MODELS_DIR
     smt.OPTUNA_TRIALS = n_trials
     smt.MODELS_DIR    = window_dir
@@ -217,7 +240,7 @@ def backtest_window(tour_key: str, test_df: pd.DataFrame, test_year: int,
             market_config = BETTING_MARKETS[market_name]
             target_col    = market_config["target_col"]
             odds_col      = market_config["odds_col"]
-            market_size   = market_config["market_size"]
+            profit_col    = market_config["profit_col"]
 
             if target_col not in event_df.columns:
                 continue
@@ -226,13 +249,10 @@ def backtest_window(tour_key: str, test_df: pd.DataFrame, test_year: int,
             if preds is None or len(preds) == 0:
                 continue
 
-            preds["Actual"]    = preds[target_col].astype(int)
-            preds              = apply_back_strategy(preds, odds_col, target_col)
-            preds              = apply_lay_strategy( preds, odds_col, target_col, market_size)
-            preds["Combo_PnL"] = preds["Back_PnL"] + preds["Lay_PnL"]
+            preds["Actual"] = preds[target_col].astype(int)
+            preds = apply_back_strategy(preds, odds_col, target_col, profit_col)
 
             bs = back_summary(preds, target_col)
-            ls = lay_summary( preds, target_col)
 
             event_summaries.append({
                 "Tour":      tour_key,
@@ -243,8 +263,6 @@ def backtest_window(tour_key: str, test_df: pd.DataFrame, test_year: int,
                 "FieldSize": len(preds),
                 "Positives": int(preds["Actual"].sum()),
                 **bs,
-                **ls,
-                "Combo_PnL": round(float(preds["Combo_PnL"].sum()), 2),
             })
 
             preds["Tour"]      = tour_key
@@ -272,17 +290,12 @@ def aggregate_results(all_preds_list: list, event_summaries_list: list,
         .reset_index(drop=True)
     )
 
-    # Cumulative P&L per market (chronological across all windows)
+    # Cumulative back P&L per market (chronological across all windows)
     for mkt in event_df["Market"].unique():
         mask = event_df["Market"] == mkt
-        for col, cum_col in [
-            ("Back_PnL",  "Back_Cumulative_PnL"),
-            ("Lay_PnL",   "Lay_Cumulative_PnL"),
-            ("Combo_PnL", "Combo_Cumulative_PnL"),
-        ]:
-            event_df.loc[mask, cum_col] = (
-                event_df.loc[mask, col].cumsum().round(2).to_numpy()
-            )
+        event_df.loc[mask, "Back_Cumulative_PnL"] = (
+            event_df.loc[mask, "Back_PnL"].cumsum().round(2).to_numpy()
+        )
 
     # Per-season summary (test year × market)
     season_rows = []
@@ -299,16 +312,14 @@ def aggregate_results(all_preds_list: list, event_summaries_list: list,
             y_prob = mdf["Normalised_Probability"].values
             disc = compute_discrimination(y_true, y_prob)
             bs   = back_summary(mdf, target_col)
-            ls   = lay_summary( mdf, target_col)
             season_rows.append({
-                "Tour":      tour_key,
-                "Test_Year": test_year,
-                "Market":    market_name,
-                "N_Events":  int(mdf["EventID"].nunique()),
-                "N_Players": len(mdf),
+                "Tour":       tour_key,
+                "Test_Year":  test_year,
+                "Market":     market_name,
+                "N_Events":   int(mdf["EventID"].nunique()),
+                "N_Players":  len(mdf),
                 "Prevalence": round(float(y_true.mean()), 4),
-                **disc, **bs, **ls,
-                "Combo_PnL": round(float(mdf["Combo_PnL"].sum()), 2),
+                **disc, **bs,
             })
 
     # Overall summary across all windows (market level)
@@ -323,16 +334,14 @@ def aggregate_results(all_preds_list: list, event_summaries_list: list,
         y_prob = mdf["Normalised_Probability"].values
         disc = compute_discrimination(y_true, y_prob)
         bs   = back_summary(mdf, target_col)
-        ls   = lay_summary( mdf, target_col)
         summary_rows.append({
-            "Tour":         tour_key,
-            "Market":       market_name,
-            "N_Test_Years": int(pred_df[pred_df["Market"] == market_name]["Test_Year"].nunique()),
-            "N_Events":     int(mdf["EventID"].nunique()),
-            "N_Players":    len(mdf),
-            "Prevalence":   round(float(y_true.mean()), 4),
-            **disc, **bs, **ls,
-            "Combo_PnL": round(float(mdf["Combo_PnL"].sum()), 2),
+            "Tour":          tour_key,
+            "Market":        market_name,
+            "N_Test_Years":  int(pred_df[pred_df["Market"] == market_name]["Test_Year"].nunique()),
+            "N_Events":      int(mdf["EventID"].nunique()),
+            "N_Players":     len(mdf),
+            "Prevalence":    round(float(y_true.mean()), 4),
+            **disc, **bs,
         })
         calib_sheets[market_name] = calibration_bins(y_true, y_prob)
 
@@ -345,9 +354,171 @@ def aggregate_results(all_preds_list: list, event_summaries_list: list,
     }
 
 
+# ===== GRID SEARCH =====
+
+def run_grid_search(pred_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sweep edge/odds/rating filters across the combined walk-forward predictions.
+
+    For each combination the strategy bets on every row passing the filter
+    and computes P&L using the same profit columns used in the main backtest
+    (dead-heat adjusted for place markets, formula-based for Winner).
+    Results are sorted by ROI%.
+    """
+    df = pred_df.copy()
+
+    # Build a single Market_Odds column
+    conditions = [df["Market"] == "Winner", df["Market"] == "Top5", df["Market"] == "Top10"]
+    choices    = [df.get("Win_odds", np.nan), df.get("Top5_odds", np.nan),
+                  df.get("Top10_odds", np.nan)]
+    df["_Market_Odds"] = np.select(conditions, choices, default=df.get("Top20_odds", np.nan))
+    df["_Edge"]        = df["_Market_Odds"] / df["Normalised_Model_Odds"].clip(1e-8)
+
+    # Pre-compute per-row "unit P&L" — what the P&L would be if we bet this row
+    # Uses profit columns (dead-heat aware) for place markets, formula for Winner.
+    df["_Unit_PnL"] = np.nan
+    for market_name, market_config in BETTING_MARKETS.items():
+        mask       = df["Market"] == market_name
+        profit_col = market_config["profit_col"]
+        if profit_col and profit_col in df.columns:
+            df.loc[mask, "_Unit_PnL"] = df.loc[mask, profit_col]
+        else:
+            odds   = df.loc[mask, "_Market_Odds"].to_numpy(dtype=float)
+            actual = df.loc[mask, "Actual"].to_numpy(dtype=float)
+            df.loc[mask, "_Unit_PnL"] = np.where(
+                actual == 1, (odds - 1) * BACK_STAKE, -BACK_STAKE
+            )
+
+    market_dfs = {m: df[df["Market"] == m] for m in BETTING_MARKETS}
+
+    combos = [
+        (mkt, edge, mn_o, mx_o, mn_r)
+        for mkt, edge, mn_o, mx_o, mn_r
+        in product(list(BETTING_MARKETS.keys()),
+                   GRID_EDGE_THRESHOLDS, GRID_MIN_ODDS, GRID_MAX_ODDS, GRID_MIN_RATING)
+        if mn_o < mx_o
+    ]
+    total = len(combos)
+    print(f"\n  Grid search: {total:,} combinations across "
+          f"{len(pred_df):,} predictions...")
+
+    results = []
+    for i, (mkt, edge, mn_o, mx_o, mn_r) in enumerate(combos):
+        if mkt not in market_dfs:
+            continue
+        sub  = market_dfs[mkt]
+        mask = (sub["_Edge"] >= edge) & (sub["_Market_Odds"] >= mn_o) & (sub["_Market_Odds"] <= mx_o)
+        if mn_r is not None:
+            mask = mask & (sub["rating"] >= mn_r)
+        filtered = sub[mask]
+        if len(filtered) == 0:
+            continue
+
+        pnl_vals     = filtered["_Unit_PnL"].values
+        actuals      = filtered["Actual"].values
+        odds         = filtered["_Market_Odds"].values
+        n_bets       = len(filtered)
+        total_staked = n_bets * BACK_STAKE
+        total_pnl    = pnl_vals.sum()
+        roi          = total_pnl / total_staked if total_staked > 0 else 0
+
+        event_pnl = pd.Series(pnl_vals, index=filtered.index).groupby(
+            filtered["EventID"]).sum()
+        n_events  = len(event_pnl)
+        epnl_std  = event_pnl.std()
+        sharpe    = (event_pnl.mean() / epnl_std * np.sqrt(n_events)) if epnl_std > 0 else 0
+        cum       = event_pnl.cumsum().values
+        max_dd    = (cum - np.maximum.accumulate(cum)).min()
+
+        results.append({
+            "Market":         mkt,
+            "Edge_Threshold": edge,
+            "Min_Odds":       mn_o,
+            "Max_Odds":       mx_o if mx_o < 9999 else "None",
+            "Min_Rating":     mn_r if mn_r is not None else "None",
+            "N_Bets":         n_bets,
+            "N_Won":          int(actuals.sum()),
+            "Strike_Rate_%":  round(actuals.mean() * 100, 2),
+            "Total_Staked":   round(total_staked, 2),
+            "Total_PnL":      round(total_pnl, 2),
+            "ROI_%":          round(roi * 100, 2),
+            "Avg_Odds":       round(odds.mean(), 2),
+            "Sharpe":         round(sharpe, 3),
+            "Max_Drawdown":   round(max_dd, 2),
+        })
+
+        if (i + 1) % 1000 == 0:
+            print(f"    {i+1:,}/{total:,} done, {len(results):,} valid so far...")
+
+    if not results:
+        return pd.DataFrame()
+
+    grid_df = pd.DataFrame(results).sort_values("ROI_%", ascending=False).reset_index(drop=True)
+    n_profitable = (grid_df["Total_PnL"] > 0).sum()
+    print(f"  Grid complete: {len(grid_df):,} valid strategies, "
+          f"{n_profitable:,} profitable ({100*n_profitable/len(grid_df):.1f}%)")
+    print(f"  Best ROI: {grid_df['ROI_%'].max():.1f}%  |  "
+          f"Best P&L: £{grid_df['Total_PnL'].max():,.0f}")
+    return grid_df
+
+
+def _write_grid_sheet(wb, grid_df: pd.DataFrame, sheet_name: str = "Strategy_Grid"):
+    """Write the grid search results to a styled Excel sheet."""
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+
+    thin_side  = Side(style="thin", color="CCCCCC")
+    std_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+    center     = Alignment(horizontal="center", vertical="center")
+    HDR_FONT   = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+    HDR_FILL   = PatternFill("solid", start_color="1F4E79")
+    BODY_FONT  = Font(name="Arial", size=9)
+    POS_FILL   = PatternFill("solid", start_color="C6EFCE")
+    NEG_FILL   = PatternFill("solid", start_color="FFC7CE")
+    MID_FILL   = PatternFill("solid", start_color="FFEB9C")
+
+    cols = list(grid_df.columns)
+    for col_idx, col_name in enumerate(cols, 1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.font      = HDR_FONT
+        cell.fill      = HDR_FILL
+        cell.alignment = center
+        cell.border    = std_border
+
+    pnl_col_idx = cols.index("Total_PnL") + 1
+    roi_col_idx = cols.index("ROI_%") + 1
+
+    for row_idx, row in grid_df.iterrows():
+        excel_row = row_idx + 2
+        for col_idx, val in enumerate(row.values, 1):
+            cell = ws.cell(row=excel_row, column=col_idx, value=val)
+            cell.font      = BODY_FONT
+            cell.border    = std_border
+            cell.alignment = center
+        pnl = row["Total_PnL"]
+        ws.cell(row=excel_row, column=pnl_col_idx).fill = (
+            POS_FILL if pnl > 0 else NEG_FILL if pnl < -200 else MID_FILL
+        )
+        ws.cell(row=excel_row, column=roi_col_idx).fill = (
+            POS_FILL if row["ROI_%"] > 0 else NEG_FILL
+        )
+
+    col_widths = {
+        "Market": 10, "Edge_Threshold": 15, "Min_Odds": 11, "Max_Odds": 11,
+        "Min_Rating": 12, "N_Bets": 9, "N_Won": 8, "Strike_Rate_%": 14,
+        "Total_Staked": 14, "Total_PnL": 13, "ROI_%": 9,
+        "Avg_Odds": 11, "Sharpe": 10, "Max_Drawdown": 15,
+    }
+    for col_idx, col_name in enumerate(cols, 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = col_widths.get(col_name, 12)
+
+    ws.freeze_panes = "A2"
+
+
 # ===== EXPORT =====
 
-def export_results(results: dict, tour_key: str) -> Path:
+def export_results(results: dict, tour_key: str, grid_df: pd.DataFrame = None) -> Path:
     WF_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = WF_RESULTS_DIR / f"{tour_key}_WalkForward_Backtest.xlsx"
 
@@ -358,21 +529,25 @@ def export_results(results: dict, tour_key: str) -> Path:
                  if c in results["all_predictions"].columns]
     pred_cols = ["Model_Score", "Probability", "Normalised_Probability",
                  "Normalised_Model_Odds", "Actual"]
-    bet_cols  = ["Back_Bet", "Back_PnL",
-                 "Lay_Bet", "Lay_Stake", "Lay_Liability", "Lay_PnL",
-                 "Combo_PnL"]
+    bet_cols  = ["Back_Bet", "Back_PnL"]
     all_cols  = id_cols + odds_cols + pred_cols + bet_cols
     export_df = results["all_predictions"][
         [c for c in all_cols if c in results["all_predictions"].columns]
     ]
 
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        results["summary"].to_excel(        writer, sheet_name="Summary",        index=False)
-        results["season_summary"].to_excel( writer, sheet_name="Season_Summary", index=False)
-        results["event_results"].to_excel(  writer, sheet_name="Event_Results",  index=False)
+        results["summary"].to_excel(        writer, sheet_name="Summary",         index=False)
+        results["season_summary"].to_excel( writer, sheet_name="Season_Summary",  index=False)
+        results["event_results"].to_excel(  writer, sheet_name="Event_Results",   index=False)
         export_df.to_excel(                 writer, sheet_name="All_Predictions", index=False)
         for mkt, calib_df in results["calibration"].items():
             calib_df.to_excel(writer, sheet_name=f"Calib_{mkt}"[:31], index=False)
+
+    # Append the grid search sheet using openpyxl directly (preserves other sheets)
+    if grid_df is not None and len(grid_df) > 0:
+        wb = load_workbook(out_path)
+        _write_grid_sheet(wb, grid_df)
+        wb.save(out_path)
 
     print(f"\n  Saved: {out_path}")
     return out_path
@@ -394,6 +569,7 @@ def run_tour(tour_key: str, tour_info: dict, n_trials: int,
     df = pd.read_excel(hist_path)
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.dropna(subset=["Date"])
+    df = join_profit_cols(df, tour_info.get("profit_file"))
     print(f"  Loaded {len(df):,} rows  |  years: "
           f"{int(df['Date'].dt.year.min())}–{int(df['Date'].dt.year.max())}")
 
@@ -407,9 +583,9 @@ def run_tour(tour_key: str, tour_info: dict, n_trials: int,
         status = " [cached]" if cached and not force_retrain else ""
         print(f"    Train {ts}–{te}  →  Test {ty}{status}")
 
-    all_preds_list    = []
-    event_summ_list   = []
-    prev_window_dir   = None
+    all_preds_list  = []
+    event_summ_list = []
+    prev_window_dir = None
 
     for train_start, train_end, test_year in windows:
         print(f"\n  --- Train {train_start}–{train_end} → Test {test_year} ---")
@@ -457,16 +633,17 @@ def run_tour(tour_key: str, tour_info: dict, n_trials: int,
 
     # Console summary
     print(f"\n  === AGGREGATE WALK-FORWARD RESULTS ({len(windows)} windows) ===")
-    print(f"  {'Market':<8}  {'AUC':>6}  {'AP':>6}  {'TSS':>6}  "
-          f"{'Back_PnL':>10}  {'Lay_PnL':>10}  {'Combo':>10}")
+    print(f"  {'Market':<8}  {'AUC':>6}  {'AP':>6}  {'TSS':>6}  {'Back_PnL':>10}  {'Back_ROI':>9}")
     for _, row in results["summary"].iterrows():
         print(
             f"  {row['Market']:<8}  {row['AUC']:>6.4f}  {row['Avg_Precision']:>6.4f}  "
-            f"{row['TSS']:>6.4f}  £{row['Back_PnL']:>9.2f}  "
-            f"£{row['Lay_PnL']:>9.2f}  £{row['Combo_PnL']:>9.2f}"
+            f"{row['TSS']:>6.4f}  £{row['Back_PnL']:>9.2f}  {row['Back_ROI']:>8.1%}"
         )
 
-    return results
+    # Grid search over all windows combined
+    grid_df = run_grid_search(results["all_predictions"])
+
+    return results, grid_df
 
 
 # ===== MAIN =====
@@ -476,8 +653,7 @@ def main():
 
     print("=== GOLF MODEL WALK-FORWARD BACKTESTING ===")
     print(f"Training window: {TRAINING_YEARS} years  |  Optuna trials: {args.trials}")
-    print(f"Back stake: £{BACK_STAKE}  |  Lay total liability: £{LAY_TOTAL_LIABILITY}  "
-          f"|  Lay odds multiplier: {LAY_ODDS_MULTIPLIER}×")
+    print(f"Back stake: £{BACK_STAKE}  |  Place markets use pre-computed dead-heat P&L")
     if args.force_retrain:
         print("  ** Force retrain: ignoring all cached models **")
 
@@ -487,14 +663,15 @@ def main():
     }
 
     for tour_key, tour_info in tours_to_run.items():
-        results = run_tour(
+        outcome = run_tour(
             tour_key, tour_info,
             n_trials=args.trials,
             min_test_year=args.min_year,
             force_retrain=args.force_retrain,
         )
-        if results:
-            export_results(results, tour_key)
+        if outcome:
+            results, grid_df = outcome
+            export_results(results, tour_key, grid_df)
 
 
 if __name__ == "__main__":
