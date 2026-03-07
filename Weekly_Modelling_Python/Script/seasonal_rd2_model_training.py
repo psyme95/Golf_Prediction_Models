@@ -36,7 +36,10 @@ from sklearn.preprocessing import StandardScaler
 import lightgbm as lgb
 import xgboost as xgb
 
-sys.path.insert(0, str(Path(__file__).parent))
+try:
+    sys.path.insert(0, str(Path(__file__).parent))
+except NameError:
+    sys.path.insert(0, str(Path.cwd()))
 from config import (
     MODELS_DIR,
     N_CV_REPEATS,

@@ -51,7 +51,10 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-sys.path.insert(0, str(Path(__file__).parent))
+try:
+    sys.path.insert(0, str(Path(__file__).parent))
+except NameError:
+    sys.path.insert(0, str(Path.cwd()))
 from config import (
     BASE_MODEL_VARS,
     BETTING_MARKETS,
