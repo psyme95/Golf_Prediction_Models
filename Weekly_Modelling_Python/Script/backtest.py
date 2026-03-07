@@ -99,7 +99,7 @@ def get_backtest_year(df: pd.DataFrame) -> int:
 # ===== PROFIT COLUMN JOIN =====
 
 PROFIT_COLS    = ["Top5_Profit", "Top10_Profit", "Top20_Profit"]
-PROFIT_JOIN_ON = ["eventID", "surname", "firstname"]
+PROFIT_JOIN_ON = ["eventID", "playerID"]
 
 
 def join_profit_cols(df: pd.DataFrame, profit_file: Path) -> pd.DataFrame:
@@ -121,7 +121,7 @@ def join_profit_cols(df: pd.DataFrame, profit_file: Path) -> pd.DataFrame:
         raw = pd.read_excel(profit_file, usecols=available_join + PROFIT_COLS)
         raw = raw.dropna(subset=available_join)
 
-        # Deduplicate to one row per (eventID, surname, firstname) so the left-join
+        # Deduplicate to one row per (eventID, playerID) so the left-join
         # doesn't explode rows when the profit file is at round- or shot-level granularity.
         before = len(raw)
         raw = raw.drop_duplicates(subset=available_join, keep="first")
