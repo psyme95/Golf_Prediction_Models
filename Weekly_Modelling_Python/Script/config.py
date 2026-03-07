@@ -40,21 +40,25 @@ BETTING_MARKETS = {
         "target_col": "win",
         "odds_col": "Win_odds",
         "market_size": 1,
+        "profit_col": None,           # No dead-heat adjustment needed for outright winner
     },
     "Top5": {
         "target_col": "top_5",
         "odds_col": "Top5_odds",
         "market_size": 5,
+        "profit_col": "Top5_Profit",  # Pre-computed £10 back P&L with dead heat rules
     },
     "Top10": {
         "target_col": "top_10",
         "odds_col": "Top10_odds",
         "market_size": 10,
+        "profit_col": "Top10_Profit", # Pre-computed £10 back P&L with dead heat rules
     },
     "Top20": {
         "target_col": "top_20",
         "odds_col": "Top20_odds",
         "market_size": 20,
+        "profit_col": "Top20_Profit", # Pre-computed £10 back P&L with dead heat rules
     },
 }
 
@@ -109,7 +113,9 @@ RD2_MODEL_VARS = [
 ]
 
 # ===== COLUMNS TO DROP FROM HISTORICAL DATA =====
-# Present in raw Excel but not needed for modelling
+# Present in raw Excel but not needed for modelling.
+# Profit columns are kept here (excluded from processed files) and joined onto
+# backtest data directly from the raw file to avoid propagating NaN-heavy columns.
 HISTORICAL_ONLY_COLS = [
     "Lay_odds", "Top40_odds", "EW_Profit", "Top5_Profit",
     "Top10_Profit", "Top20_Profit", "Top40_Profit",
@@ -122,6 +128,7 @@ TOUR_CONFIG = {
     "PGA": {
         "name": "PGA Tour",
         "historical_file": INPUT_DIR / "PGA_Processed.xlsx",
+        "profit_file": INPUT_DIR / "PGA.xlsx",           # Raw file: source of Profit columns
         "weekly_file": INPUT_DIR / "This_Week_PGA_Processed.xlsx",
         "rd2_predictions_file": SHARED_INPUT_DIR / "Full_PGA_Historical_Predictions.xlsx",
         "rd2_raw_file": SHARED_INPUT_DIR / "PGA.xlsx",
@@ -130,6 +137,7 @@ TOUR_CONFIG = {
     "Euro": {
         "name": "European Tour",
         "historical_file": INPUT_DIR / "Euro_Processed.xlsx",
+        "profit_file": INPUT_DIR / "Euro.xlsx",          # Raw file: source of Profit columns
         "weekly_file": INPUT_DIR / "This_Week_Euro_Processed.xlsx",
         "rd2_predictions_file": SHARED_INPUT_DIR / "Full_Euro_Historical_Predictions.xlsx",
         "rd2_raw_file": SHARED_INPUT_DIR / "Euro.xlsx",
