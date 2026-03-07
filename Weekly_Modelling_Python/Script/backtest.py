@@ -121,6 +121,13 @@ def join_profit_cols(df: pd.DataFrame, profit_file: Path) -> pd.DataFrame:
         raw = pd.read_excel(profit_file, usecols=available_join + PROFIT_COLS)
         raw = raw.dropna(subset=available_join)
 
+        # Deduplicate to one row per (eventID, surname, firstname) so the left-join
+        # doesn't explode rows when the profit file is at round- or shot-level granularity.
+        before = len(raw)
+        raw = raw.drop_duplicates(subset=available_join, keep="first")
+        if len(raw) < before:
+            print(f"  [join_profit_cols] Deduplicated profit file: {before:,} → {len(raw):,} rows")
+
         # Drop any profit cols already present in df to avoid _x/_y conflicts
         existing = [c for c in PROFIT_COLS if c in df.columns]
         if existing:
