@@ -22,7 +22,7 @@ warnings.filterwarnings("ignore")
 # ── Config ────────────────────────────────────────────────────────────────────
 INPUT_FILE   = r"D:\Golf\Repo\Weekly_Modelling_Python\Output\WalkForward\Results\PGA_WalkForward_Backtest.xlsx"
 OUTPUT_SHEET = "Strategy_Grid"
-FIXED_STAKE   = 10
+FIXED_STAKE  = 10
 BANKROLL     = 2000
 KELLY_FRAC   = 0.25
 
@@ -72,9 +72,11 @@ def run_strategy(sub, staking):
     if mask.sum() == 0:
         return None
 
+    # Use iloc-safe filtered sub to keep index alignment for groupby
+    sub_filtered = sub.iloc[mask] if isinstance(mask, np.ndarray) else sub[mask]
     stakes  = stakes[mask]
-    actuals = sub["Actual"].values[mask]
-    odds    = sub["Market_Odds"].values[mask]
+    actuals = sub_filtered["Actual"].values
+    odds    = sub_filtered["Market_Odds"].values
 
     pnl = np.where(actuals == 1, stakes * (odds - 1), -stakes)
 
@@ -84,13 +86,12 @@ def run_strategy(sub, staking):
     roi          = total_pnl / total_staked if total_staked > 0 else 0
 
     # Sharpe and drawdown aggregated to event level
-    event_pnl   = pd.Series(pnl, index=sub[mask].index).groupby(
-                      sub[mask]["EventID"]).sum()
-    n_events    = len(event_pnl)
-    epnl_std    = event_pnl.std()
-    sharpe      = (event_pnl.mean() / epnl_std * np.sqrt(n_events)) if epnl_std > 0 else 0
-    cum         = event_pnl.cumsum().values
-    max_dd      = (cum - np.maximum.accumulate(cum)).min()
+    event_pnl = pd.Series(pnl, index=sub_filtered["EventID"]).groupby(level=0).sum()
+    n_events  = len(event_pnl)
+    epnl_std  = event_pnl.std()
+    sharpe    = (event_pnl.mean() / epnl_std * np.sqrt(n_events)) if epnl_std > 0 else 0
+    cum       = event_pnl.cumsum().values
+    max_dd    = (cum - np.maximum.accumulate(cum)).min()
 
     return {
         "N_Bets":        n_bets,
@@ -145,8 +146,8 @@ print(f"Profitable (PnL > 0): {n_profitable:,} ({100*n_profitable/len(results_df
 print(f"Best ROI:  {results_df['ROI_%'].max():.1f}%")
 print(f"Best PnL:  £{results_df['Total_PnL'].max():,.0f}")
 print(f"\nTop 5 by ROI%:")
-print(results_df[["Market","Staking","Edge_Threshold","Min_Odds","Max_Odds",
-                   "Min_Rating","N_Bets","ROI_%","Total_PnL","Sharpe"]].head().to_string(index=False))
+print(results_df[["Market", "Edge_Threshold", "Min_Odds", "Max_Odds",
+                   "Min_Rating", "N_Bets", "ROI_%", "Total_PnL", "Sharpe"]].head().to_string(index=False))
 
 # ── Write to workbook ─────────────────────────────────────────────────────────
 print(f"\nWriting to '{OUTPUT_SHEET}' sheet in {INPUT_FILE}...")
@@ -165,12 +166,11 @@ BODY_FONT = Font(name="Arial", size=9)
 POS_FILL  = PatternFill("solid", start_color="C6EFCE")
 NEG_FILL  = PatternFill("solid", start_color="FFC7CE")
 MID_FILL  = PatternFill("solid", start_color="FFEB9C")
-META_FILL = PatternFill("solid", start_color="D9E1F2")
 
-# Column headers (row 4)
+# Column headers (row 1)
 cols = list(results_df.columns)
 for col_idx, col_name in enumerate(cols, 1):
-    cell = ws.cell(row=4, column=col_idx, value=col_name)
+    cell = ws.cell(row=1, column=col_idx, value=col_name)
     cell.font = HDR_FONT
     cell.fill = HDR_FILL
     cell.alignment = center
@@ -182,7 +182,7 @@ pnl_col_idx = cols.index("Total_PnL") + 1
 roi_col_idx = cols.index("ROI_%") + 1
 
 for row_idx, row in results_df.iterrows():
-    excel_row = row_idx + 5
+    excel_row = row_idx + 2
     for col_idx, val in enumerate(row.values, 1):
         cell = ws.cell(row=excel_row, column=col_idx, value=val)
         cell.font = BODY_FONT
@@ -199,7 +199,7 @@ for row_idx, row in results_df.iterrows():
 
 # Column widths
 widths = {
-    "Market": 10, "Staking": 20, "Edge_Threshold": 15, "Min_Odds": 11,
+    "Market": 10, "Edge_Threshold": 15, "Min_Odds": 11,
     "Max_Odds": 11, "Min_Rating": 12, "N_Bets": 9, "N_Won": 8,
     "Strike_Rate_%": 14, "Total_Staked": 14, "Total_PnL": 13,
     "ROI_%": 9, "Avg_Odds": 11, "Sharpe": 10, "Max_Drawdown": 15,
@@ -207,7 +207,7 @@ widths = {
 for col_idx, col_name in enumerate(cols, 1):
     ws.column_dimensions[get_column_letter(col_idx)].width = widths.get(col_name, 12)
 
-ws.freeze_panes = "A5"
+ws.freeze_panes = "A2"
 
 wb.save(INPUT_FILE)
 print(f"Done. Open {INPUT_FILE} and navigate to the '{OUTPUT_SHEET}' sheet.")
