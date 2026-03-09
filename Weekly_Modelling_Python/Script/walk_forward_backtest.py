@@ -14,6 +14,27 @@ Example: data available 2018–2026
   Window 6:  Train 2023–2024  →  Test 2025
   Window 7:  Train 2024–2025  →  Test 2026
 
+Odds
+----
+All P&L calculations use Betfair Lay odds (Lay_odds, Lay_top5, Lay_top10,
+Lay_top20), which are pre-event snapshots and closer to expected back prices
+than bookie odds. No pre-computed profit columns are used; P&L is formula-based
+for all markets with dead-heat adjustment applied to place markets.
+
+Dead heat (place markets only)
+-------------------------------
+A dead heat occurs when players tie at exactly the cut position (5, 10, or 20),
+meaning fewer places are available than players tied there. Only players AT the
+cut position are affected; players finishing clearly inside the cut get full odds.
+
+  places_filled_above     = count of players with posn < cut
+  places_available_in_tie = cut - places_filled_above
+  players_tied            = count of players with posn == cut position in data
+  RF                      = places_available_in_tie / players_tied  (clamped 0–1)
+
+  Win P&L  = stake × (RF × lay_odds - 1)
+  Loss P&L = -stake
+
 Caching
 -------
 Trained model bundles are saved to Output/WalkForward/Models/{tour}_{year}/
@@ -28,15 +49,15 @@ Warm-start: best params from window N are passed as starting suggestions to wind
 
 Back betting
 ------------
-Bet when Normalised_Model_Odds < Market_Odds (fixed £10 stake).
-  Winner:          P&L = (market_odds - 1) × 10 on win, -10 on loss.
-  Top5/Top10/Top20: P&L from pre-computed profit column (dead-heat adjusted).
+Bet when Normalised_Model_Odds < Lay_odds (fixed £10 stake).
+Winner:          P&L = (lay_odds - 1) × 10 on win, -10 on loss.
+Top5/Top10/Top20: same formula with dead-heat RF applied to winning rows.
 
 Grid search
 -----------
 After all windows are processed a parameter grid is swept over the combined
 All_Predictions data. Dimensions:
-  Edge threshold  — ratio of market odds to model odds required before betting
+  Edge threshold  — ratio of lay odds to model odds required before betting
   Min/Max odds    — odds range filter
   Min rating      — player rating floor filter
 Results are written to the Strategy_Grid sheet of the output workbook.
@@ -55,8 +76,13 @@ Run:
   python walk_forward_backtest.py                         # both tours, all windows, 30 trials
   python walk_forward_backtest.py --tour PGA
   python walk_forward_backtest.py --trials 75             # full Optuna
-  python walk_forward_backtest.py --min-year 2022         # start from 2022 test window
+  python walk_forward_backtest.py --start-year 2022       # discard data before 2022 (faster)
+  python walk_forward_backtest.py --min-year 2024         # skip windows with test year < 2024
   python walk_forward_backtest.py --force-retrain         # ignore cached models
+
+  --start-year trims the data loaded into memory; combined with --min-year you can
+  run a single test window quickly,  e.g.:
+    --start-year 2022 --min-year 2024   loads 2022+, only evaluates 2024 test window
 """
 
 import argparse
@@ -82,15 +108,11 @@ from sklearn.metrics import (
 try:
     sys.path.insert(0, str(Path(__file__).parent))
 except NameError:
-    # IPython/Jupyter or PyCharm console: __file__ is unavailable.
-    # Search common locations relative to CWD (project root, Weekly_Modelling_Python, or Script).
     _cwd = Path.cwd()
     _candidates = [_cwd, _cwd / "Weekly_Modelling_Python" / "Script", _cwd / "Script"]
     _script_dir = next((p for p in _candidates if (p / "seasonal_model_training.py").exists()), _cwd)
     sys.path.insert(0, str(_script_dir))
 
-# Import seasonal_model_training as a module so we can monkey-patch
-# OPTUNA_TRIALS and MODELS_DIR per window without touching other state.
 import seasonal_model_training as smt
 
 from config import (
@@ -99,15 +121,6 @@ from config import (
     PREDICTIONS_DIR,
     TOUR_CONFIG,
     TRAINING_YEARS,
-)
-from backtest import (
-    BACK_STAKE,
-    apply_back_strategy,
-    back_summary,
-    calibration_bins,
-    compute_discrimination,
-    join_profit_cols,
-    predict_event,
 )
 from seasonal_model_training import get_market_vars, tss_optimal
 
@@ -119,8 +132,27 @@ WF_MODELS_DIR  = WF_DIR / "Models"
 WF_RESULTS_DIR = WF_DIR / "Results"
 
 # ===== CONSTANTS =====
+BACK_STAKE        = 10.0   # £ per back bet
 DEFAULT_WF_TRIALS = 30
-MIN_POSITIVES     = 10   # skip a market window if training set has fewer positives
+MIN_POSITIVES     = 10     # skip a market window if training set has fewer positives
+
+# ===== LAY ODDS COLUMN MAPPING =====
+# Maps each market name to its Betfair Lay odds column.
+# These are pre-event snapshots used for both the edge condition and P&L.
+LAY_ODDS_COLS = {
+    "Winner": "Lay_odds",
+    "Top5":   "Lay_top5",
+    "Top10":  "Lay_top10",
+    "Top20":  "Lay_top20",
+}
+
+# Cut position for each place market — used for dead-heat calculation.
+# Winner has no cut position (no dead-heat logic applied).
+PLACE_MARKET_CUTS = {
+    "Top5":  5,
+    "Top10": 10,
+    "Top20": 20,
+}
 
 # ===== GRID SEARCH PARAMETERS =====
 GRID_EDGE_THRESHOLDS = [1.0, 1.05, 1.1, 1.25, 1.5, 2.0, 3.0, 5.0]
@@ -140,11 +172,252 @@ def parse_args():
     parser.add_argument("--trials", type=int, default=DEFAULT_WF_TRIALS,
                         help=f"Optuna trials per model per market "
                              f"(default: {DEFAULT_WF_TRIALS})")
+    parser.add_argument("--start-year", type=int, default=None, dest="start_year",
+                        help="Discard all data before this year (reduces memory and load time)")
     parser.add_argument("--min-year", type=int, default=None, dest="min_year",
                         help="Earliest test year to evaluate (default: all available)")
     parser.add_argument("--force-retrain", action="store_true", dest="force_retrain",
                         help="Ignore cached models and retrain all windows")
     return parser.parse_args()
+
+
+# ===== PREDICTION =====
+
+def predict_event(event_df: pd.DataFrame, market_name: str,
+                  market_pkg: dict) -> pd.DataFrame | None:
+    """
+    Apply a trained market package to a single event's player rows.
+    Mirrors the weekly prediction script exactly so backtest reflects
+    real deployment behaviour.
+    """
+    model_vars = market_pkg["model_vars"]
+    odds_col   = market_pkg["odds_col"]
+
+    available = [v for v in model_vars if v in event_df.columns]
+    df = event_df[available + [odds_col]].copy()
+    for col in available + [odds_col]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna()
+    if len(df) == 0:
+        return None
+
+    X    = df[available].values.astype(float)
+    odds = df[odds_col].values.astype(float)
+
+    model_preds = np.column_stack([
+        m.predict_proba(X)[:, 1] for m in market_pkg["models"].values()
+    ])
+    raw_score = model_preds.mean(axis=1)
+
+    meta_X_scaled = market_pkg["meta_scaler"].transform(model_preds)
+    proba         = market_pkg["meta_model"].predict_proba(meta_X_scaled)[:, 1]
+
+    market_size = market_pkg["market_size"]
+    prob_sum    = proba.sum()
+    norm_prob   = (proba / prob_sum) * market_size if prob_sum > 0 else proba
+
+    result = event_df.loc[df.index].copy()
+    result["Model_Score"]            = raw_score.round(5)
+    result["Probability"]            = proba.round(6)
+    result["Normalised_Probability"] = norm_prob.round(6)
+    result["Normalised_Model_Odds"]  = (1.0 / norm_prob.clip(1e-8)).round(2)
+    return result
+
+
+# ===== DEAD HEAT =====
+
+def compute_reduction_factors(event_df: pd.DataFrame, cut: int) -> pd.Series:
+    posn = pd.to_numeric(event_df["posn"], errors="coerce")
+    rf   = pd.Series(1.0, index=event_df.index)
+
+    # Find the highest position value that still qualifies (posn <= cut)
+    # and check if more players share it than there are places remaining
+    qualifying = posn[posn <= cut]
+    if len(qualifying) == 0:
+        return rf
+
+    tied_posn = qualifying.max()  # the position at the cut boundary
+
+    places_filled_above = int((posn < tied_posn).sum())
+    places_available    = cut - places_filled_above
+    players_tied        = int((posn == tied_posn).sum())
+
+    if players_tied > places_available:
+        dh_rf = float(np.clip(places_available / players_tied, 0.0, 1.0))
+        rf[posn == tied_posn] = dh_rf
+
+    return rf
+
+# ===== BACK BETTING STRATEGY =====
+
+def apply_back_strategy(df: pd.DataFrame, lay_odds_col: str,
+                        target_col: str,
+                        market_name: str = "Winner") -> pd.DataFrame:
+    """
+    Back when Normalised_Model_Odds < Lay_odds (model thinks player underpriced).
+    Fixed stake BACK_STAKE per bet.
+
+    Winner market — straight formula, no dead-heat adjustment:
+      Win:  P&L = (lay_odds - 1) * BACK_STAKE
+      Loss: P&L = -BACK_STAKE
+
+    Place markets (Top5 / Top10 / Top20) — dead-heat RF applied to winners
+    who are tied exactly at the cut position:
+      Win (clear):       P&L = (lay_odds - 1) * BACK_STAKE          [RF = 1]
+      Win (dead heat):   P&L = BACK_STAKE * (RF * lay_odds - 1)     [RF < 1]
+      Loss:              P&L = -BACK_STAKE
+
+    The RF is computed per-event from the posn column. If posn is missing
+    the function falls back to RF = 1.0 (no adjustment) for that event.
+    """
+    df     = df.copy()
+    lay    = df[lay_odds_col].to_numpy(dtype=float)
+    actual = df[target_col].to_numpy(dtype=float)
+    model  = df["Normalised_Model_Odds"].to_numpy(dtype=float)
+    is_back = model < lay
+
+    # Build RF array — default 1.0 (no dead heat)
+    rf = np.ones(len(df), dtype=float)
+
+    cut = PLACE_MARKET_CUTS.get(market_name)
+    if cut is not None and "posn" in df.columns:
+        # Compute RF per event so ties are evaluated within each field
+        for event_id, idx in df.groupby("eventID").groups.items():
+            event_slice = df.loc[idx]
+            event_rf    = compute_reduction_factors(event_slice, cut)
+            rf[df.index.get_indexer(idx)] = event_rf.values
+
+    # P&L: stake × (RF × odds - 1) on win, -stake on loss
+    # When RF == 1 this reduces to the standard (odds - 1) × stake formula
+    back_pnl = np.where(
+        is_back & (actual == 1),  BACK_STAKE * (rf * lay - 1),
+        np.where(is_back, -BACK_STAKE, 0.0)
+    )
+
+    df["Back_Bet"]          = is_back
+    df["Back_PnL"]          = back_pnl
+    df["DeadHeat_RF"]       = rf          # retained for inspection / audit
+    return df
+
+
+# ===== STRATEGY SUMMARY =====
+
+def back_summary(df: pd.DataFrame, target_col: str) -> dict:
+    bets = df[df["Back_Bet"]]
+    if len(bets) == 0:
+        return {"Back_NBets": 0, "Back_NWon": 0, "Back_HitRate": np.nan,
+                "Back_PnL": 0.0, "Back_ROI": np.nan}
+    n_bets = len(bets)
+    n_won  = int(bets[target_col].sum())
+    pnl    = float(bets["Back_PnL"].sum())
+    return {
+        "Back_NBets":   n_bets,
+        "Back_NWon":    n_won,
+        "Back_HitRate": round(n_won / n_bets, 4),
+        "Back_PnL":     round(pnl, 2),
+        "Back_ROI":     round(pnl / (n_bets * BACK_STAKE), 4),
+    }
+
+
+# ===== MODEL QUALITY METRICS =====
+
+def compute_discrimination(y_true: np.ndarray, y_prob: np.ndarray) -> dict:
+    if y_true.sum() == 0:
+        return {"AUC": np.nan, "Avg_Precision": np.nan, "TSS": np.nan,
+                "Log_Loss": np.nan, "Brier": np.nan}
+    y_clip = np.clip(y_prob, 1e-15, 1 - 1e-15)
+    return {
+        "AUC":           round(roc_auc_score(y_true, y_prob), 4),
+        "Avg_Precision": round(average_precision_score(y_true, y_prob), 4),
+        "TSS":           round(tss_optimal(y_true, y_prob), 4),
+        "Log_Loss":      round(log_loss(y_true, y_clip), 5),
+        "Brier":         round(brier_score_loss(y_true, y_prob), 5),
+    }
+
+
+def calibration_bins(y_true: np.ndarray, y_prob: np.ndarray,
+                     n_bins: int = 10) -> pd.DataFrame:
+    bins = np.linspace(0, 1, n_bins + 1)
+    rows = []
+    for lo, hi in zip(bins[:-1], bins[1:]):
+        mask = (y_prob >= lo) & (y_prob < hi)
+        if mask.sum() == 0:
+            continue
+        rows.append({
+            "Bin_Low":        round(lo, 2),
+            "Bin_High":       round(hi, 2),
+            "N":              int(mask.sum()),
+            "Mean_Predicted": round(float(y_prob[mask].mean()), 4),
+            "Actual_Rate":    round(float(y_true[mask].mean()), 4),
+        })
+    return pd.DataFrame(rows)
+
+
+# ===== LAY ODDS JOIN =====
+
+LAY_JOIN_COLS = list(LAY_ODDS_COLS.values())   # ["Lay_odds", "Lay_top5", "Lay_top10", "Lay_top20"]
+LAY_JOIN_ON   = ["eventID", "playerID"]
+
+
+def join_lay_odds(df: pd.DataFrame, raw_file: Path) -> pd.DataFrame:
+    """
+    Left-join Betfair Lay odds onto the processed DataFrame from the raw Excel file.
+
+    The Lay columns are stripped during preprocessing due to high missingness
+    (they are not model features) but are needed at backtest time for P&L.
+
+    Join keys: eventID + playerID
+    Source:    profit_file (e.g. PGA.xlsx / Euro.xlsx) in TOUR_CONFIG
+
+    Rows with no Lay odds in the raw file will have NaN in those columns;
+    backtest_window already skips events where all Lay odds are NaN.
+    """
+    if raw_file is None or not raw_file.exists():
+        print(f"  WARNING: Raw file not found for Lay odds join: {raw_file}")
+        return df
+
+    try:
+        available_join = [c for c in LAY_JOIN_ON if c in df.columns]
+        if not available_join:
+            print(f"  WARNING: Join keys {LAY_JOIN_ON} not found in processed data — skipping Lay odds join")
+            return df
+
+        # Read only the columns we need — much faster than loading the full raw file
+        usecols = available_join + LAY_JOIN_COLS
+        raw = pd.read_excel(raw_file, usecols=lambda c: c in usecols)
+
+        # Keep only Lay columns that actually exist in the raw file
+        present_lay = [c for c in LAY_JOIN_COLS if c in raw.columns]
+        missing_lay = [c for c in LAY_JOIN_COLS if c not in raw.columns]
+        if missing_lay:
+            print(f"  WARNING: Lay columns not found in raw file: {missing_lay}")
+        if not present_lay:
+            print(f"  WARNING: No Lay columns found in {raw_file.name} — backtesting will be skipped")
+            return df
+
+        raw = raw[available_join + present_lay].dropna(subset=available_join)
+
+        # Deduplicate to one row per (eventID, playerID)
+        before = len(raw)
+        raw = raw.drop_duplicates(subset=available_join, keep="first")
+        if len(raw) < before:
+            print(f"  [join_lay_odds] Deduplicated: {before:,} → {len(raw):,} rows")
+
+        # Drop any Lay cols already present in df to avoid _x/_y conflicts
+        existing = [c for c in present_lay if c in df.columns]
+        if existing:
+            df = df.drop(columns=existing)
+
+        df = df.merge(raw[available_join + present_lay], on=available_join, how="left")
+
+        n_matched = df[present_lay[0]].notna().sum()
+        print(f"  Lay odds joined: {n_matched:,}/{len(df):,} rows have Lay odds "
+              f"({100*n_matched/len(df):.1f}%)")
+
+    except Exception as e:
+        print(f"  WARNING: Could not join Lay odds from {raw_file.name}: {e}")
+
+    return df
 
 
 # ===== WALK-FORWARD WINDOW LOGIC =====
@@ -160,7 +433,7 @@ def get_windows(df: pd.DataFrame, min_test_year: int = None):
         train_end   = test_year - 1
         train_start = test_year - TRAINING_YEARS
         if train_start < years[0]:
-            continue   # not enough history
+            continue
         if min_test_year and test_year < min_test_year:
             continue
         windows.append((int(train_start), int(train_end), int(test_year)))
@@ -186,14 +459,12 @@ def train_window(tour_key: str, train_df: pd.DataFrame, test_year: int,
     window_dir = WF_MODELS_DIR / f"{tour_key}_{test_year}"
     window_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy warm params from previous window so Optuna starts nearby
     if prev_window_dir and prev_window_dir.exists():
         for f in prev_window_dir.glob("*_best_params.pkl"):
             dest = window_dir / f.name
             if not dest.exists():
                 shutil.copy(f, dest)
 
-    # Temporarily redirect module constants so train_market uses our settings
     orig_trials     = smt.OPTUNA_TRIALS
     orig_models_dir = smt.MODELS_DIR
     smt.OPTUNA_TRIALS = n_trials
@@ -204,7 +475,6 @@ def train_window(tour_key: str, train_df: pd.DataFrame, test_year: int,
         for market_name, market_config in BETTING_MARKETS.items():
             target_col = market_config["target_col"]
 
-            # Guard: skip if training set is too sparse for this market
             if target_col in train_df.columns:
                 n_pos = int(train_df[target_col].sum())
                 if n_pos < MIN_POSITIVES:
@@ -219,7 +489,6 @@ def train_window(tour_key: str, train_df: pd.DataFrame, test_year: int,
             if result is not None:
                 package[market_name] = result
     finally:
-        # Always restore, even if training raises
         smt.OPTUNA_TRIALS = orig_trials
         smt.MODELS_DIR    = orig_models_dir
 
@@ -231,7 +500,7 @@ def train_window(tour_key: str, train_df: pd.DataFrame, test_year: int,
 def backtest_window(tour_key: str, test_df: pd.DataFrame, test_year: int,
                     package: dict):
     """
-    Apply all trained markets to every event in test_df.
+    Apply all trained markets to every event in test_df using Betfair Lay odds.
     Returns (all_predictions list, event_summaries list).
     """
     all_predictions = []
@@ -248,9 +517,16 @@ def backtest_window(tour_key: str, test_df: pd.DataFrame, test_year: int,
             market_config = BETTING_MARKETS[market_name]
             target_col    = market_config["target_col"]
             odds_col      = market_config["odds_col"]
-            profit_col    = market_config["profit_col"]
+            lay_odds_col  = LAY_ODDS_COLS.get(market_name)
 
             if target_col not in event_df.columns:
+                continue
+
+            # Skip if Lay odds column is absent or fully missing for this event
+            if lay_odds_col is None or lay_odds_col not in event_df.columns:
+                print(f"    {market_name}: no Lay odds column '{lay_odds_col}' — skipping event {event_id}")
+                continue
+            if event_df[lay_odds_col].isna().all():
                 continue
 
             preds = predict_event(event_df, market_name, market_pkg)
@@ -258,7 +534,7 @@ def backtest_window(tour_key: str, test_df: pd.DataFrame, test_year: int,
                 continue
 
             preds["Actual"] = preds[target_col].astype(int)
-            preds = apply_back_strategy(preds, odds_col, target_col, profit_col)
+            preds = apply_back_strategy(preds, lay_odds_col, target_col, market_name)
 
             bs = back_summary(preds, target_col)
 
@@ -298,14 +574,12 @@ def aggregate_results(all_preds_list: list, event_summaries_list: list,
         .reset_index(drop=True)
     )
 
-    # Cumulative back P&L per market (chronological across all windows)
     for mkt in event_df["Market"].unique():
         mask = event_df["Market"] == mkt
         event_df.loc[mask, "Back_Cumulative_PnL"] = (
             event_df.loc[mask, "Back_PnL"].cumsum().round(2).to_numpy()
         )
 
-    # Per-season summary (test year × market)
     season_rows = []
     for test_year in sorted(pred_df["Test_Year"].unique()):
         for market_name, market_config in BETTING_MARKETS.items():
@@ -330,7 +604,6 @@ def aggregate_results(all_preds_list: list, event_summaries_list: list,
                 **disc, **bs,
             })
 
-    # Overall summary across all windows (market level)
     summary_rows = []
     calib_sheets = {}
     for market_name, market_config in BETTING_MARKETS.items():
@@ -368,34 +641,30 @@ def run_grid_search(pred_df: pd.DataFrame) -> pd.DataFrame:
     """
     Sweep edge/odds/rating filters across the combined walk-forward predictions.
 
-    For each combination the strategy bets on every row passing the filter
-    and computes P&L using the same profit columns used in the main backtest
-    (dead-heat adjusted for place markets, formula-based for Winner).
+    Edge is defined as Lay_odds / Normalised_Model_Odds. P&L uses the same
+    formula-based calculation as apply_back_strategy (Lay odds, no dead heat).
     Results are sorted by ROI%.
     """
     df = pred_df.copy()
 
-    # Build a single Market_Odds column
-    conditions = [df["Market"] == "Winner", df["Market"] == "Top5", df["Market"] == "Top10"]
-    choices    = [df.get("Win_odds", np.nan), df.get("Top5_odds", np.nan),
-                  df.get("Top10_odds", np.nan)]
-    df["_Market_Odds"] = np.select(conditions, choices, default=df.get("Top20_odds", np.nan))
-    df["_Edge"]        = df["_Market_Odds"] / df["Normalised_Model_Odds"].clip(1e-8)
+    # Resolve which Lay odds column applies to each row
+    df["_Lay_Odds"] = np.nan
+    for market_name, lay_col in LAY_ODDS_COLS.items():
+        if lay_col in df.columns:
+            mask = df["Market"] == market_name
+            df.loc[mask, "_Lay_Odds"] = df.loc[mask, lay_col]
 
-    # Pre-compute per-row "unit P&L" — what the P&L would be if we bet this row
-    # Uses profit columns (dead-heat aware) for place markets, formula for Winner.
-    df["_Unit_PnL"] = np.nan
-    for market_name, market_config in BETTING_MARKETS.items():
-        mask       = df["Market"] == market_name
-        profit_col = market_config["profit_col"]
-        if profit_col and profit_col in df.columns:
-            df.loc[mask, "_Unit_PnL"] = df.loc[mask, profit_col]
-        else:
-            odds   = df.loc[mask, "_Market_Odds"].to_numpy(dtype=float)
-            actual = df.loc[mask, "Actual"].to_numpy(dtype=float)
-            df.loc[mask, "_Unit_PnL"] = np.where(
-                actual == 1, (odds - 1) * BACK_STAKE, -BACK_STAKE
-            )
+    df["_Edge"] = df["_Lay_Odds"] / df["Normalised_Model_Odds"].clip(1e-8)
+
+    # Formula-based unit P&L with dead-heat RF for place markets.
+    # RF is already stored on each row from apply_back_strategy; fall back to
+    # 1.0 if the column is absent (e.g. Winner market rows).
+    actual = df["Actual"].to_numpy(dtype=float)
+    lay    = df["_Lay_Odds"].to_numpy(dtype=float)
+    rf     = df["DeadHeat_RF"].to_numpy(dtype=float) if "DeadHeat_RF" in df.columns else np.ones(len(df))
+    df["_Unit_PnL"] = np.where(
+        actual == 1, BACK_STAKE * (rf * lay - 1), -BACK_STAKE
+    )
 
     market_dfs = {m: df[df["Market"] == m] for m in BETTING_MARKETS}
 
@@ -415,7 +684,7 @@ def run_grid_search(pred_df: pd.DataFrame) -> pd.DataFrame:
         if mkt not in market_dfs:
             continue
         sub  = market_dfs[mkt]
-        mask = (sub["_Edge"] >= edge) & (sub["_Market_Odds"] >= mn_o) & (sub["_Market_Odds"] <= mx_o)
+        mask = (sub["_Edge"] >= edge) & (sub["_Lay_Odds"] >= mn_o) & (sub["_Lay_Odds"] <= mx_o)
         if mn_r is not None:
             mask = mask & (sub["rating"] >= mn_r)
         filtered = sub[mask]
@@ -424,7 +693,7 @@ def run_grid_search(pred_df: pd.DataFrame) -> pd.DataFrame:
 
         pnl_vals     = filtered["_Unit_PnL"].values
         actuals      = filtered["Actual"].values
-        odds         = filtered["_Market_Odds"].values
+        odds         = filtered["_Lay_Odds"].values
         n_bets       = len(filtered)
         total_staked = n_bets * BACK_STAKE
         total_pnl    = pnl_vals.sum()
@@ -450,7 +719,7 @@ def run_grid_search(pred_df: pd.DataFrame) -> pd.DataFrame:
             "Total_Staked":   round(total_staked, 2),
             "Total_PnL":      round(total_pnl, 2),
             "ROI_%":          round(roi * 100, 2),
-            "Avg_Odds":       round(odds.mean(), 2),
+            "Avg_Lay_Odds":   round(odds.mean(), 2),
             "Sharpe":         round(sharpe, 3),
             "Max_Drawdown":   round(max_dd, 2),
         })
@@ -516,7 +785,7 @@ def _write_grid_sheet(wb, grid_df: pd.DataFrame, sheet_name: str = "Strategy_Gri
         "Market": 10, "Edge_Threshold": 15, "Min_Odds": 11, "Max_Odds": 11,
         "Min_Rating": 12, "N_Bets": 9, "N_Won": 8, "Strike_Rate_%": 14,
         "Total_Staked": 14, "Total_PnL": 13, "ROI_%": 9,
-        "Avg_Odds": 11, "Sharpe": 10, "Max_Drawdown": 15,
+        "Avg_Lay_Odds": 13, "Sharpe": 10, "Max_Drawdown": 15,
     }
     for col_idx, col_name in enumerate(cols, 1):
         ws.column_dimensions[get_column_letter(col_idx)].width = col_widths.get(col_name, 12)
@@ -533,12 +802,12 @@ def export_results(results: dict, tour_key: str, grid_df: pd.DataFrame = None) -
     id_cols   = [c for c in ["Test_Year", "Date", "EventID", "Market",
                               "surname", "firstname", "posn", "rating"]
                  if c in results["all_predictions"].columns]
-    odds_cols = [c for c in ["Win_odds", "Top5_odds", "Top10_odds", "Top20_odds"]
+    lay_cols  = [c for c in LAY_ODDS_COLS.values()
                  if c in results["all_predictions"].columns]
     pred_cols = ["Model_Score", "Probability", "Normalised_Probability",
                  "Normalised_Model_Odds", "Actual"]
-    bet_cols  = ["Back_Bet", "Back_PnL"]
-    all_cols  = id_cols + odds_cols + pred_cols + bet_cols
+    bet_cols  = ["Back_Bet", "DeadHeat_RF", "Back_PnL"]
+    all_cols  = id_cols + lay_cols + pred_cols + bet_cols
     export_df = results["all_predictions"][
         [c for c in all_cols if c in results["all_predictions"].columns]
     ]
@@ -551,7 +820,6 @@ def export_results(results: dict, tour_key: str, grid_df: pd.DataFrame = None) -
         for mkt, calib_df in results["calibration"].items():
             calib_df.to_excel(writer, sheet_name=f"Calib_{mkt}"[:31], index=False)
 
-    # Append the grid search sheet using openpyxl directly (preserves other sheets)
     if grid_df is not None and len(grid_df) > 0:
         wb = load_workbook(out_path)
         _write_grid_sheet(wb, grid_df)
@@ -564,7 +832,7 @@ def export_results(results: dict, tour_key: str, grid_df: pd.DataFrame = None) -
 # ===== TOUR RUNNER =====
 
 def run_tour(tour_key: str, tour_info: dict, n_trials: int,
-             min_test_year: int, force_retrain: bool):
+             start_year: int, min_test_year: int, force_retrain: bool):
     print(f"\n{'='*60}")
     print(f"WALK-FORWARD: {tour_info['name']}")
     print(f"{'='*60}")
@@ -577,7 +845,16 @@ def run_tour(tour_key: str, tour_info: dict, n_trials: int,
     df = pd.read_excel(hist_path)
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.dropna(subset=["Date"])
-    df = join_profit_cols(df, tour_info.get("profit_file"))
+
+    # Trim to start_year if specified — reduces memory and speeds up window generation
+    if start_year is not None:
+        before = len(df)
+        df = df[df["Date"].dt.year >= start_year].copy()
+        print(f"  --start-year {start_year}: trimmed {before:,} → {len(df):,} rows")
+
+    # Join Betfair Lay odds from raw file (stripped during preprocessing)
+    df = join_lay_odds(df, tour_info.get("profit_file"))
+
     print(f"  Loaded {len(df):,} rows  |  years: "
           f"{int(df['Date'].dt.year.min())}–{int(df['Date'].dt.year.max())}")
 
@@ -624,7 +901,6 @@ def run_tour(tour_key: str, tour_info: dict, n_trials: int,
 
         prev_window_dir = WF_MODELS_DIR / f"{tour_key}_{test_year}"
 
-        # Backtest on test year
         test_df = df[df["Date"].dt.year == test_year].copy()
         if len(test_df) == 0:
             print(f"  No test data for {test_year}"); continue
@@ -639,7 +915,6 @@ def run_tour(tour_key: str, tour_info: dict, n_trials: int,
     if results is None:
         print("  No results to aggregate."); return None
 
-    # Console summary
     print(f"\n  === AGGREGATE WALK-FORWARD RESULTS ({len(windows)} windows) ===")
     print(f"  {'Market':<8}  {'AUC':>6}  {'AP':>6}  {'TSS':>6}  {'Back_PnL':>10}  {'Back_ROI':>9}")
     for _, row in results["summary"].iterrows():
@@ -648,7 +923,6 @@ def run_tour(tour_key: str, tour_info: dict, n_trials: int,
             f"{row['TSS']:>6.4f}  £{row['Back_PnL']:>9.2f}  {row['Back_ROI']:>8.1%}"
         )
 
-    # Grid search over all windows combined
     grid_df = run_grid_search(results["all_predictions"])
 
     return results, grid_df
@@ -661,7 +935,11 @@ def main():
 
     print("=== GOLF MODEL WALK-FORWARD BACKTESTING ===")
     print(f"Training window: {TRAINING_YEARS} years  |  Optuna trials: {args.trials}")
-    print(f"Back stake: £{BACK_STAKE}  |  Place markets use pre-computed dead-heat P&L")
+    print(f"Back stake: £{BACK_STAKE}  |  Lay odds P&L  |  Dead-heat RF applied to place markets")
+    if args.start_year:
+        print(f"  Data start year: {args.start_year}")
+    if args.min_year:
+        print(f"  Min test year:   {args.min_year}")
     if args.force_retrain:
         print("  ** Force retrain: ignoring all cached models **")
 
@@ -674,6 +952,7 @@ def main():
         outcome = run_tour(
             tour_key, tour_info,
             n_trials=args.trials,
+            start_year=args.start_year,
             min_test_year=args.min_year,
             force_retrain=args.force_retrain,
         )
