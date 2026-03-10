@@ -81,7 +81,7 @@ Run:
   python walk_forward_backtest.py --force-retrain         # ignore cached models
 
   --start-year trims the data loaded into memory; combined with --min-year you can
-  run a single test window quickly,  e.g.:
+  run a single test window quickly, e.g.:
     --start-year 2022 --min-year 2024   loads 2022+, only evaluates 2024 test window
 """
 
@@ -89,7 +89,6 @@ import argparse
 import shutil
 import sys
 import warnings
-from itertools import product
 from pathlib import Path
 
 import joblib
@@ -136,6 +135,23 @@ BACK_STAKE        = 10.0   # £ per back bet
 DEFAULT_WF_TRIALS = 30
 MIN_POSITIVES     = 10     # skip a market window if training set has fewer positives
 
+# ===== LAY STAKING =====
+# Fixed liability per player per market (£)
+LAY_FIXED_LIABILITY = {
+    "Winner": 1000.0,
+    "Top5":    200.0,
+    "Top10":   100.0,
+    "Top20":    50.0,
+}
+
+# Fixed stake per player per market (£)
+LAY_FIXED_STAKE = {
+    "Winner":  1.0,
+    "Top5":    5.0,
+    "Top10":  10.0,
+    "Top20":  20.0,
+}
+
 # ===== LAY ODDS COLUMN MAPPING =====
 # Maps each market name to its Betfair Lay odds column.
 # These are pre-event snapshots used for both the edge condition and P&L.
@@ -155,10 +171,11 @@ PLACE_MARKET_CUTS = {
 }
 
 # ===== GRID SEARCH PARAMETERS =====
-GRID_EDGE_THRESHOLDS = [1.0, 1.05, 1.1, 1.25, 1.5, 2.0, 3.0, 5.0]
-GRID_MIN_ODDS        = [1.0, 3.0, 5.0, 10.0]
-GRID_MAX_ODDS        = [9999, 10, 25, 50, 100, 200, 500]   # 9999 = no cap
-GRID_MIN_RATING      = [None, 50, 55, 60, 65, 70]           # None = no filter
+# Back grid: floor thresholds — bet if rating >= threshold
+# Lay grid:  ceiling thresholds — bet if rating < threshold
+# "All" row (no filter) is always included as baseline in both grids.
+GRID_BACK_RATING_FLOORS   = [55, 60, 65, 70]
+GRID_LAY_RATING_CEILINGS  = [55, 60, 65, 70]
 
 
 # ===== CLI =====
@@ -227,26 +244,44 @@ def predict_event(event_df: pd.DataFrame, market_name: str,
 # ===== DEAD HEAT =====
 
 def compute_reduction_factors(event_df: pd.DataFrame, cut: int) -> pd.Series:
+    """
+    Compute a per-row dead-heat reduction factor (RF) for a place market.
+
+    Only rows where posn == the tied cut position receive RF < 1.
+    Rows finishing clearly inside the cut (posn < cut) always get RF = 1.0
+    because they are unambiguous winners regardless of any tie at the boundary.
+
+    Parameters
+    ----------
+    event_df : DataFrame for a single event (all players).
+    cut      : Cut position for the market (5, 10, or 20).
+
+    Returns
+    -------
+    pd.Series of RF values aligned to event_df.index.
+    """
     posn = pd.to_numeric(event_df["posn"], errors="coerce")
     rf   = pd.Series(1.0, index=event_df.index)
 
-    # Find the highest position value that still qualifies (posn <= cut)
-    # and check if more players share it than there are places remaining
     qualifying = posn[posn <= cut]
     if len(qualifying) == 0:
         return rf
 
-    tied_posn = qualifying.max()  # the position at the cut boundary
-
+    # The actual boundary position (e.g. 9 when 11 players tie for 9th)
+    tied_posn           = int(qualifying.max())
     places_filled_above = int((posn < tied_posn).sum())
     places_available    = cut - places_filled_above
-    players_tied        = int((posn == tied_posn).sum())
+    tied_mask           = posn == tied_posn
+    players_tied        = int(tied_mask.sum())
 
-    if players_tied > places_available:
-        dh_rf = float(np.clip(places_available / players_tied, 0.0, 1.0))
-        rf[posn == tied_posn] = dh_rf
+    if players_tied > 1 and places_available < players_tied:
+        # Genuine dead heat — clamp RF to [0, 1] as a safety guard
+        raw_rf = places_available / players_tied
+        dh_rf  = float(np.clip(raw_rf, 0.0, 1.0))
+        rf[tied_mask] = dh_rf
 
     return rf
+
 
 # ===== BACK BETTING STRATEGY =====
 
@@ -316,6 +351,162 @@ def back_summary(df: pd.DataFrame, target_col: str) -> dict:
         "Back_HitRate": round(n_won / n_bets, 4),
         "Back_PnL":     round(pnl, 2),
         "Back_ROI":     round(pnl / (n_bets * BACK_STAKE), 4),
+    }
+
+
+# ===== LAY BETTING STRATEGY =====
+
+def _lay_return(lay: np.ndarray, actual: np.ndarray, rf: np.ndarray,
+                exp_winners: np.ndarray, act_winners: np.ndarray,
+                liability: np.ndarray) -> np.ndarray:
+    """
+    Core dead-heat aware lay return formula (vectorised).
+
+    For winning outcomes (actual == 1, i.e. bad for the layer):
+        Return = ((1 - (exp_winners / act_winners) * lay) / (lay - 1)) * liability
+
+    For losing outcomes (actual == 0, i.e. good for the layer):
+        Return = liability / (lay - 1)    [= stake]
+
+    When there is no dead heat exp_winners == act_winners == 1, so the formula
+    reduces to the standard -liability (win) / +stake (loss).
+
+    exp_winners : places available in the tie  (= places_available from RF logic)
+    act_winners : players tied at the cut      (= players_tied from RF logic)
+    Both are 1.0 for no-dead-heat rows and for the Winner market.
+    """
+    stake      = liability / np.clip(lay - 1, 1e-8, None)
+    win_return = ((1 - (exp_winners / np.clip(act_winners, 1e-8, None)) * lay)
+                  / np.clip(lay - 1, 1e-8, None)) * liability
+    los_return = stake
+    return np.where(actual == 1, win_return, los_return)
+
+
+def _build_dh_arrays(df: pd.DataFrame, market_name: str):
+    """
+    Return (exp_winners, act_winners) arrays aligned to df.index.
+
+    For the Winner market or when posn is absent both arrays are all 1.0
+    (no dead heat possible).  For place markets we re-use the same
+    compute_reduction_factors logic to derive the raw counts.
+    """
+    n           = len(df)
+    exp_arr     = np.ones(n, dtype=float)
+    act_arr     = np.ones(n, dtype=float)
+    cut         = PLACE_MARKET_CUTS.get(market_name)
+
+    if cut is None or "posn" not in df.columns:
+        return exp_arr, act_arr
+
+    posn = pd.to_numeric(df["posn"], errors="coerce")
+
+    for _, idx in df.groupby("eventID").groups.items():
+        ep   = posn.loc[idx]
+        qual = ep[ep <= cut]
+        if len(qual) == 0:
+            continue
+        tied_posn            = qual.max()
+        places_filled_above  = int((ep < tied_posn).sum())
+        places_available     = cut - places_filled_above
+        players_tied         = int((ep == tied_posn).sum())
+
+        if players_tied > places_available:
+            # Dead heat — store counts for affected rows
+            tied_iloc = [df.index.get_loc(i) for i in idx if posn.loc[i] == tied_posn]
+            exp_arr[tied_iloc] = float(places_available)
+            act_arr[tied_iloc] = float(players_tied)
+        # else: no dead heat, arrays stay 1.0
+
+    return exp_arr, act_arr
+
+
+def apply_lay_strategy(df: pd.DataFrame, lay_odds_col: str,
+                       target_col: str,
+                       market_name: str = "Winner") -> pd.DataFrame:
+    """
+    Lay when Normalised_Model_Odds > Lay_odds (model thinks player overpriced).
+
+    Two staking methods computed in parallel:
+
+    Fixed liability (LAY_FIXED_LIABILITY per market):
+        Stake  = liability / (lay_odds - 1)
+        Return = dead-heat formula applied to fixed liability
+
+    Fixed stake (LAY_FIXED_STAKE per market):
+        Liability = stake * (lay_odds - 1)
+        Return    = dead-heat formula applied to that liability
+
+    Dead heat formula (vectorised via _lay_return):
+        Win (bad):  ((1 - (exp_winners/act_winners) * odds) / (odds-1)) * liability
+        Loss (good): liability / (odds - 1)   [= stake, unchanged by dead heat]
+    """
+    df      = df.copy()
+    lay     = df[lay_odds_col].to_numpy(dtype=float)
+    actual  = df[target_col].to_numpy(dtype=float)
+    model   = df["Normalised_Model_Odds"].to_numpy(dtype=float)
+    is_lay  = model > lay
+
+    exp_winners, act_winners = _build_dh_arrays(df, market_name)
+
+    # Fixed liability
+    fl          = LAY_FIXED_LIABILITY[market_name]
+    liability_fl = np.full(len(df), fl, dtype=float)
+    pnl_fl = np.where(
+        is_lay,
+        _lay_return(lay, actual, None, exp_winners, act_winners, liability_fl),
+        0.0
+    )
+
+    # Fixed stake
+    fs          = LAY_FIXED_STAKE[market_name]
+    liability_fs = fs * np.clip(lay - 1, 1e-8, None)
+    pnl_fs = np.where(
+        is_lay,
+        _lay_return(lay, actual, None, exp_winners, act_winners, liability_fs),
+        0.0
+    )
+
+    df["Lay_Bet"]              = is_lay
+    df["Lay_PnL_FixedLiab"]   = pnl_fl
+    df["Lay_PnL_FixedStake"]  = pnl_fs
+    return df
+
+
+def lay_summary(df: pd.DataFrame, target_col: str,
+                market_name: str) -> dict:
+    bets = df[df["Lay_Bet"]]
+    if len(bets) == 0:
+        return {
+            "Lay_NBets": 0, "Lay_NLost": 0, "Lay_HitRate": np.nan,
+            "Lay_PnL_FixedLiab": 0.0,  "Lay_ROI_FixedLiab": np.nan,
+            "Lay_PnL_FixedStake": 0.0, "Lay_ROI_FixedStake": np.nan,
+        }
+    n_bets  = len(bets)
+    # "won" for a layer = player did NOT finish in the places
+    n_lost  = int(bets[target_col].sum())   # times layer lost (player won/placed)
+    n_won   = n_bets - n_lost               # times layer won
+
+    fl      = LAY_FIXED_LIABILITY[market_name]
+    fs      = LAY_FIXED_STAKE[market_name]
+    pnl_fl  = float(bets["Lay_PnL_FixedLiab"].sum())
+    pnl_fs  = float(bets["Lay_PnL_FixedStake"].sum())
+
+    # ROI denominators
+    # Fixed liability: total amount at risk = n_bets × liability
+    # Fixed stake:     total staked = n_bets × stake (stake varies by odds,
+    #                  so use mean stake as the denominator)
+    total_liability = n_bets * fl
+    lay_odds_vals   = bets["Lay_PnL_FixedStake"]   # proxy; use actual stake col if present
+    total_staked_fs = float((fs * (bets[LAY_ODDS_COLS[market_name]] - 1)).sum())
+
+    return {
+        "Lay_NBets":            n_bets,
+        "Lay_NLost":            n_lost,
+        "Lay_HitRate":          round(n_won / n_bets, 4),
+        "Lay_PnL_FixedLiab":   round(pnl_fl, 2),
+        "Lay_ROI_FixedLiab":   round(pnl_fl / total_liability, 4) if total_liability > 0 else np.nan,
+        "Lay_PnL_FixedStake":  round(pnl_fs, 2),
+        "Lay_ROI_FixedStake":  round(pnl_fs / total_staked_fs, 4) if total_staked_fs > 0 else np.nan,
     }
 
 
@@ -506,6 +697,17 @@ def backtest_window(tour_key: str, test_df: pd.DataFrame, test_year: int,
     all_predictions = []
     event_summaries = []
 
+    # Clean zero/NaN lay odds once across the whole test year, per market.
+    # Zero odds corrupt P&L via division by (lay - 1); NaN rows are already
+    # excluded by predict_event's dropna but zeros slip through.
+    for market_name, lay_col in LAY_ODDS_COLS.items():
+        if lay_col in test_df.columns:
+            before   = test_df[lay_col].notna().sum()
+            test_df[lay_col] = test_df[lay_col].replace(0, np.nan)
+            n_zeroed = before - test_df[lay_col].notna().sum()
+            if n_zeroed > 0:
+                print(f"  {market_name}: zeroed {n_zeroed} invalid lay odds entries")
+
     events = test_df["eventID"].unique()
     print(f"  Test {test_year}: {len(events)} events  |  {len(test_df):,} player-rows")
 
@@ -535,8 +737,10 @@ def backtest_window(tour_key: str, test_df: pd.DataFrame, test_year: int,
 
             preds["Actual"] = preds[target_col].astype(int)
             preds = apply_back_strategy(preds, lay_odds_col, target_col, market_name)
+            preds = apply_lay_strategy(preds, lay_odds_col, target_col, market_name)
 
-            bs = back_summary(preds, target_col)
+            bs  = back_summary(preds, target_col)
+            ls  = lay_summary(preds, target_col, market_name)
 
             event_summaries.append({
                 "Tour":      tour_key,
@@ -547,6 +751,7 @@ def backtest_window(tour_key: str, test_df: pd.DataFrame, test_year: int,
                 "FieldSize": len(preds),
                 "Positives": int(preds["Actual"].sum()),
                 **bs,
+                **ls,
             })
 
             preds["Tour"]      = tour_key
@@ -576,9 +781,9 @@ def aggregate_results(all_preds_list: list, event_summaries_list: list,
 
     for mkt in event_df["Market"].unique():
         mask = event_df["Market"] == mkt
-        event_df.loc[mask, "Back_Cumulative_PnL"] = (
-            event_df.loc[mask, "Back_PnL"].cumsum().round(2).to_numpy()
-        )
+        event_df.loc[mask, "Back_Cumulative_PnL"]          = event_df.loc[mask, "Back_PnL"].cumsum().round(2).to_numpy()
+        event_df.loc[mask, "Lay_Cumulative_PnL_FixedLiab"] = event_df.loc[mask, "Lay_PnL_FixedLiab"].cumsum().round(2).to_numpy()
+        event_df.loc[mask, "Lay_Cumulative_PnL_FixedStake"]= event_df.loc[mask, "Lay_PnL_FixedStake"].cumsum().round(2).to_numpy()
 
     season_rows = []
     for test_year in sorted(pred_df["Test_Year"].unique()):
@@ -594,6 +799,7 @@ def aggregate_results(all_preds_list: list, event_summaries_list: list,
             y_prob = mdf["Normalised_Probability"].values
             disc = compute_discrimination(y_true, y_prob)
             bs   = back_summary(mdf, target_col)
+            ls   = lay_summary(mdf, target_col, market_name)
             season_rows.append({
                 "Tour":       tour_key,
                 "Test_Year":  test_year,
@@ -601,7 +807,7 @@ def aggregate_results(all_preds_list: list, event_summaries_list: list,
                 "N_Events":   int(mdf["EventID"].nunique()),
                 "N_Players":  len(mdf),
                 "Prevalence": round(float(y_true.mean()), 4),
-                **disc, **bs,
+                **disc, **bs, **ls,
             })
 
     summary_rows = []
@@ -615,6 +821,7 @@ def aggregate_results(all_preds_list: list, event_summaries_list: list,
         y_prob = mdf["Normalised_Probability"].values
         disc = compute_discrimination(y_true, y_prob)
         bs   = back_summary(mdf, target_col)
+        ls   = lay_summary(mdf, target_col, market_name)
         summary_rows.append({
             "Tour":          tour_key,
             "Market":        market_name,
@@ -622,7 +829,7 @@ def aggregate_results(all_preds_list: list, event_summaries_list: list,
             "N_Events":      int(mdf["EventID"].nunique()),
             "N_Players":     len(mdf),
             "Prevalence":    round(float(y_true.mean()), 4),
-            **disc, **bs,
+            **disc, **bs, **ls,
         })
         calib_sheets[market_name] = calibration_bins(y_true, y_prob)
 
@@ -637,110 +844,195 @@ def aggregate_results(all_preds_list: list, event_summaries_list: list,
 
 # ===== GRID SEARCH =====
 
-def run_grid_search(pred_df: pd.DataFrame) -> pd.DataFrame:
+def _grid_metrics(band_df: pd.DataFrame, pnl_col: str,
+                  actuals_col: str, odds_col: str,
+                  staked_per_bet: float | None = None) -> dict:
     """
-    Sweep edge/odds/rating filters across the combined walk-forward predictions.
+    Compute standard grid metrics for a filtered DataFrame.
 
-    Edge is defined as Lay_odds / Normalised_Model_Odds. P&L uses the same
-    formula-based calculation as apply_back_strategy (Lay odds, no dead heat).
-    Results are sorted by ROI%.
+    staked_per_bet: fixed amount staked per bet for ROI denominator.
+                    If None, ROI is not computed (e.g. fixed-liability lay).
+    """
+    pnl_vals = band_df[pnl_col].to_numpy(dtype=float)
+    actuals  = band_df[actuals_col].to_numpy(dtype=float)
+    odds     = pd.to_numeric(band_df[odds_col], errors="coerce").to_numpy(dtype=float)
+    n_bets   = len(band_df)
+    total_pnl = pnl_vals.sum()
+
+    event_pnl = pd.Series(pnl_vals, index=band_df.index).groupby(band_df["EventID"]).sum()
+    n_events  = len(event_pnl)
+    epnl_std  = event_pnl.std()
+    sharpe    = (event_pnl.mean() / epnl_std) if epnl_std > 0 else 0
+    cum       = event_pnl.cumsum().values
+    max_dd    = float((cum - np.maximum.accumulate(cum)).min())
+
+    roi = (total_pnl / (n_bets * staked_per_bet)) if staked_per_bet else np.nan
+
+    return {
+        "N_Bets":        n_bets,
+        "N_Won":         int(actuals.sum()),
+        "Strike_Rate_%": round(actuals.mean() * 100, 2),
+        "Total_PnL":     round(total_pnl, 2),
+        "ROI_%":         round(roi * 100, 2) if not np.isnan(roi) else np.nan,
+        "Avg_Lay_Odds":  round(float(np.nanmean(odds)), 2) if len(odds) > 0 else np.nan,
+        "Sharpe":        round(sharpe, 3),
+        "Max_Drawdown":  round(max_dd, 2),
+    }
+
+
+def run_back_grid_search(pred_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Back grid: sweep rating floor thresholds across edge-filtered predictions.
+
+    Baseline edge condition (model odds < lay odds) always applied first.
+    Floors: bet if rating >= threshold. "All" row = no rating filter.
+    Results sorted by Market then Rating_Floor.
     """
     df = pred_df.copy()
 
-    # Resolve which Lay odds column applies to each row
     df["_Lay_Odds"] = np.nan
     for market_name, lay_col in LAY_ODDS_COLS.items():
         if lay_col in df.columns:
-            mask = df["Market"] == market_name
-            df.loc[mask, "_Lay_Odds"] = df.loc[mask, lay_col]
+            df.loc[df["Market"] == market_name, "_Lay_Odds"] = df.loc[df["Market"] == market_name, lay_col]
 
-    df["_Edge"] = df["_Lay_Odds"] / df["Normalised_Model_Odds"].clip(1e-8)
+    # Baseline: model odds < lay odds
+    df = df[df["Normalised_Model_Odds"] < df["_Lay_Odds"]].copy()
 
-    # Formula-based unit P&L with dead-heat RF for place markets.
-    # RF is already stored on each row from apply_back_strategy; fall back to
-    # 1.0 if the column is absent (e.g. Winner market rows).
-    actual = df["Actual"].to_numpy(dtype=float)
-    lay    = df["_Lay_Odds"].to_numpy(dtype=float)
-    rf     = df["DeadHeat_RF"].to_numpy(dtype=float) if "DeadHeat_RF" in df.columns else np.ones(len(df))
-    df["_Unit_PnL"] = np.where(
-        actual == 1, BACK_STAKE * (rf * lay - 1), -BACK_STAKE
-    )
+    rf  = df["DeadHeat_RF"].to_numpy(dtype=float) if "DeadHeat_RF" in df.columns else np.ones(len(df))
+    lay = df["_Lay_Odds"].to_numpy(dtype=float)
+    act = df["Actual"].to_numpy(dtype=float)
+    df["_Back_PnL"] = np.where(act == 1, BACK_STAKE * (rf * lay - 1), -BACK_STAKE)
 
-    market_dfs = {m: df[df["Market"] == m] for m in BETTING_MARKETS}
+    thresholds = [("All", None)] + [(f">= {t}", t) for t in GRID_BACK_RATING_FLOORS]
 
-    combos = [
-        (mkt, edge, mn_o, mx_o, mn_r)
-        for mkt, edge, mn_o, mx_o, mn_r
-        in product(list(BETTING_MARKETS.keys()),
-                   GRID_EDGE_THRESHOLDS, GRID_MIN_ODDS, GRID_MAX_ODDS, GRID_MIN_RATING)
-        if mn_o < mx_o
-    ]
-    total = len(combos)
-    print(f"\n  Grid search: {total:,} combinations across "
-          f"{len(pred_df):,} predictions...")
+    print(f"\n  Back grid search: {len(BETTING_MARKETS)} markets × {len(thresholds)} "
+          f"rating floors (edge-filtered: {len(df):,} bets)...")
 
     results = []
-    for i, (mkt, edge, mn_o, mx_o, mn_r) in enumerate(combos):
-        if mkt not in market_dfs:
+    for market_name in BETTING_MARKETS:
+        mdf = df[df["Market"] == market_name]
+        if len(mdf) == 0:
             continue
-        sub  = market_dfs[mkt]
-        mask = (sub["_Edge"] >= edge) & (sub["_Lay_Odds"] >= mn_o) & (sub["_Lay_Odds"] <= mx_o)
-        if mn_r is not None:
-            mask = mask & (sub["rating"] >= mn_r)
-        filtered = sub[mask]
-        if len(filtered) == 0:
-            continue
-
-        pnl_vals     = filtered["_Unit_PnL"].values
-        actuals      = filtered["Actual"].values
-        odds         = filtered["_Lay_Odds"].values
-        n_bets       = len(filtered)
-        total_staked = n_bets * BACK_STAKE
-        total_pnl    = pnl_vals.sum()
-        roi          = total_pnl / total_staked if total_staked > 0 else 0
-
-        event_pnl = pd.Series(pnl_vals, index=filtered.index).groupby(
-            filtered["EventID"]).sum()
-        n_events  = len(event_pnl)
-        epnl_std  = event_pnl.std()
-        sharpe    = (event_pnl.mean() / epnl_std * np.sqrt(n_events)) if epnl_std > 0 else 0
-        cum       = event_pnl.cumsum().values
-        max_dd    = (cum - np.maximum.accumulate(cum)).min()
-
-        results.append({
-            "Market":         mkt,
-            "Edge_Threshold": edge,
-            "Min_Odds":       mn_o,
-            "Max_Odds":       mx_o if mx_o < 9999 else "None",
-            "Min_Rating":     mn_r if mn_r is not None else "None",
-            "N_Bets":         n_bets,
-            "N_Won":          int(actuals.sum()),
-            "Strike_Rate_%":  round(actuals.mean() * 100, 2),
-            "Total_Staked":   round(total_staked, 2),
-            "Total_PnL":      round(total_pnl, 2),
-            "ROI_%":          round(roi * 100, 2),
-            "Avg_Lay_Odds":   round(odds.mean(), 2),
-            "Sharpe":         round(sharpe, 3),
-            "Max_Drawdown":   round(max_dd, 2),
-        })
-
-        if (i + 1) % 1000 == 0:
-            print(f"    {i+1:,}/{total:,} done, {len(results):,} valid so far...")
+        for label, floor in thresholds:
+            band_df = mdf[mdf["rating"] >= floor] if floor is not None else mdf
+            if len(band_df) == 0:
+                continue
+            m = _grid_metrics(band_df, "_Back_PnL", "Actual", "_Lay_Odds", BACK_STAKE)
+            results.append({
+                "Market":        market_name,
+                "Rating_Floor":  floor if floor is not None else "All",
+                **m,
+            })
 
     if not results:
         return pd.DataFrame()
 
-    grid_df = pd.DataFrame(results).sort_values("ROI_%", ascending=False).reset_index(drop=True)
-    n_profitable = (grid_df["Total_PnL"] > 0).sum()
-    print(f"  Grid complete: {len(grid_df):,} valid strategies, "
-          f"{n_profitable:,} profitable ({100*n_profitable/len(grid_df):.1f}%)")
-    print(f"  Best ROI: {grid_df['ROI_%'].max():.1f}%  |  "
-          f"Best P&L: £{grid_df['Total_PnL'].max():,.0f}")
+    grid_df = (pd.DataFrame(results)
+               .sort_values(["Market", "Rating_Floor"], na_position="first")
+               .reset_index(drop=True))
+
+    print(f"  Back grid complete: {len(grid_df)} rows")
+    for _, row in grid_df.iterrows():
+        print(f"    {row['Market']:<8}  Rating>={str(row['Rating_Floor']):<6}  "
+              f"{row['N_Bets']:>5} bets  "
+              f"P&L=£{row['Total_PnL']:>8.2f}  ROI={row['ROI_%']:>6.1f}%")
+
     return grid_df
 
 
-def _write_grid_sheet(wb, grid_df: pd.DataFrame, sheet_name: str = "Strategy_Grid"):
-    """Write the grid search results to a styled Excel sheet."""
+def run_lay_grid_search(pred_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Lay grid: sweep rating ceiling thresholds across edge-filtered predictions.
+
+    Baseline edge condition (model odds > lay odds) always applied first.
+    Ceilings: bet if rating < threshold. "All" row = no rating filter.
+
+    Both fixed-liability and fixed-stake P&L columns are reported.
+    Results sorted by Market then Rating_Ceiling.
+    """
+    df = pred_df.copy()
+
+    df["_Lay_Odds"] = np.nan
+    for market_name, lay_col in LAY_ODDS_COLS.items():
+        if lay_col in df.columns:
+            df.loc[df["Market"] == market_name, "_Lay_Odds"] = df.loc[df["Market"] == market_name, lay_col]
+
+    # Baseline: model odds > lay odds
+    df = df[df["Normalised_Model_Odds"] > df["_Lay_Odds"]].copy()
+
+    thresholds = [("All", None)] + [(f"< {t}", t) for t in GRID_LAY_RATING_CEILINGS]
+
+    print(f"\n  Lay grid search: {len(BETTING_MARKETS)} markets × {len(thresholds)} "
+          f"rating ceilings (edge-filtered: {len(df):,} bets)...")
+
+    results = []
+    for market_name, market_config in BETTING_MARKETS.items():
+        target_col = market_config["target_col"]
+        mdf = df[df["Market"] == market_name]
+        if len(mdf) == 0:
+            continue
+
+        fl = LAY_FIXED_LIABILITY[market_name]
+        fs = LAY_FIXED_STAKE[market_name]
+
+        for label, ceiling in thresholds:
+            band_df = mdf[mdf["rating"] < ceiling] if ceiling is not None else mdf
+            if len(band_df) == 0:
+                continue
+
+            # Fixed liability metrics — ROI denominator = n_bets × liability
+            m_fl = _grid_metrics(band_df, "Lay_PnL_FixedLiab",
+                                 "Actual", "_Lay_Odds", fl)
+            # Fixed stake metrics — ROI denominator = n_bets × stake
+            m_fs = _grid_metrics(band_df, "Lay_PnL_FixedStake",
+                                 "Actual", "_Lay_Odds", fs)
+
+            results.append({
+                "Market":                  market_name,
+                "Rating_Ceiling":          ceiling if ceiling is not None else "All",
+                "N_Bets":                  m_fl["N_Bets"],
+                "N_Lost":                  m_fl["N_Won"],    # N_Won = player placed = layer lost
+                "Strike_Rate_%":           round((m_fl["N_Bets"] - m_fl["N_Won"]) / m_fl["N_Bets"] * 100, 2),
+                "Avg_Lay_Odds":            m_fl["Avg_Lay_Odds"],
+                # Fixed liability
+                "FL_Liability":            fl,
+                "FL_Total_PnL":            m_fl["Total_PnL"],
+                "FL_ROI_%":                m_fl["ROI_%"],
+                "FL_Sharpe":               m_fl["Sharpe"],
+                "FL_Max_Drawdown":         m_fl["Max_Drawdown"],
+                # Fixed stake
+                "FS_Stake":                fs,
+                "FS_Total_PnL":            m_fs["Total_PnL"],
+                "FS_ROI_%":                m_fs["ROI_%"],
+                "FS_Sharpe":               m_fs["Sharpe"],
+                "FS_Max_Drawdown":         m_fs["Max_Drawdown"],
+            })
+
+    if not results:
+        return pd.DataFrame()
+
+    grid_df = (pd.DataFrame(results)
+               .sort_values(["Market", "Rating_Ceiling"], na_position="first")
+               .reset_index(drop=True))
+
+    print(f"  Lay grid complete: {len(grid_df)} rows")
+    for _, row in grid_df.iterrows():
+        print(f"    {row['Market']:<8}  Rating<{str(row['Rating_Ceiling']):<6}  "
+              f"{row['N_Bets']:>5} bets  "
+              f"FL P&L=£{row['FL_Total_PnL']:>8.2f}  "
+              f"FS P&L=£{row['FS_Total_PnL']:>8.2f}")
+
+    return grid_df
+
+
+def _write_grid_sheet(wb, grid_df: pd.DataFrame, sheet_name: str,
+                      pnl_cols: list[str], roi_cols: list[str]):
+    """
+    Write a grid search DataFrame to a styled Excel sheet.
+
+    pnl_cols: column names to colour-code by P&L value
+    roi_cols: column names to colour-code by ROI sign
+    """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
@@ -763,8 +1055,8 @@ def _write_grid_sheet(wb, grid_df: pd.DataFrame, sheet_name: str = "Strategy_Gri
         cell.alignment = center
         cell.border    = std_border
 
-    pnl_col_idx = cols.index("Total_PnL") + 1
-    roi_col_idx = cols.index("ROI_%") + 1
+    pnl_idxs = [cols.index(c) + 1 for c in pnl_cols if c in cols]
+    roi_idxs = [cols.index(c) + 1 for c in roi_cols if c in cols]
 
     for row_idx, row in grid_df.iterrows():
         excel_row = row_idx + 2
@@ -773,40 +1065,50 @@ def _write_grid_sheet(wb, grid_df: pd.DataFrame, sheet_name: str = "Strategy_Gri
             cell.font      = BODY_FONT
             cell.border    = std_border
             cell.alignment = center
-        pnl = row["Total_PnL"]
-        ws.cell(row=excel_row, column=pnl_col_idx).fill = (
-            POS_FILL if pnl > 0 else NEG_FILL if pnl < -200 else MID_FILL
-        )
-        ws.cell(row=excel_row, column=roi_col_idx).fill = (
-            POS_FILL if row["ROI_%"] > 0 else NEG_FILL
-        )
+        for ci in pnl_idxs:
+            pnl = row.iloc[ci - 1]
+            ws.cell(row=excel_row, column=ci).fill = (
+                POS_FILL if pnl > 0 else NEG_FILL if pnl < -200 else MID_FILL
+            )
+        for ci in roi_idxs:
+            ws.cell(row=excel_row, column=ci).fill = (
+                POS_FILL if row.iloc[ci - 1] > 0 else NEG_FILL
+            )
 
+    default_w = 12
     col_widths = {
-        "Market": 10, "Edge_Threshold": 15, "Min_Odds": 11, "Max_Odds": 11,
-        "Min_Rating": 12, "N_Bets": 9, "N_Won": 8, "Strike_Rate_%": 14,
-        "Total_Staked": 14, "Total_PnL": 13, "ROI_%": 9,
-        "Avg_Lay_Odds": 13, "Sharpe": 10, "Max_Drawdown": 15,
+        "Market": 10, "Rating_Floor": 14, "Rating_Ceiling": 16,
+        "N_Bets": 9, "N_Won": 8, "N_Lost": 8, "Strike_Rate_%": 14,
+        "Total_PnL": 13, "ROI_%": 9, "Avg_Lay_Odds": 13,
+        "Sharpe": 10, "Max_Drawdown": 15,
+        "FL_Liability": 13, "FL_Total_PnL": 14, "FL_ROI_%": 10,
+        "FL_Sharpe": 10, "FL_Max_Drawdown": 16,
+        "FS_Stake": 10, "FS_Total_PnL": 14, "FS_ROI_%": 10,
+        "FS_Sharpe": 10, "FS_Max_Drawdown": 16,
     }
     for col_idx, col_name in enumerate(cols, 1):
-        ws.column_dimensions[get_column_letter(col_idx)].width = col_widths.get(col_name, 12)
+        ws.column_dimensions[get_column_letter(col_idx)].width = col_widths.get(col_name, default_w)
 
     ws.freeze_panes = "A2"
 
 
 # ===== EXPORT =====
 
-def export_results(results: dict, tour_key: str, grid_df: pd.DataFrame = None) -> Path:
+def export_results(results: dict, tour_key: str,
+                   back_grid_df: pd.DataFrame = None,
+                   lay_grid_df: pd.DataFrame = None) -> Path:
     WF_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = WF_RESULTS_DIR / f"{tour_key}_WalkForward_Backtest.xlsx"
 
     id_cols   = [c for c in ["Test_Year", "Date", "EventID", "Market",
-                              "surname", "firstname", "posn", "rating"]
+                              "playerID", "surname", "firstname", "posn", "rating"]
                  if c in results["all_predictions"].columns]
     lay_cols  = [c for c in LAY_ODDS_COLS.values()
                  if c in results["all_predictions"].columns]
     pred_cols = ["Model_Score", "Probability", "Normalised_Probability",
                  "Normalised_Model_Odds", "Actual"]
-    bet_cols  = ["Back_Bet", "DeadHeat_RF", "Back_PnL"]
+    bet_cols  = ["Back_Bet", "DeadHeat_RF", "Back_PnL",
+                 "Lay_Bet", "Lay_PnL_FixedLiab", "Lay_PnL_FixedStake"]
     all_cols  = id_cols + lay_cols + pred_cols + bet_cols
     export_df = results["all_predictions"][
         [c for c in all_cols if c in results["all_predictions"].columns]
@@ -817,13 +1119,19 @@ def export_results(results: dict, tour_key: str, grid_df: pd.DataFrame = None) -
         results["season_summary"].to_excel( writer, sheet_name="Season_Summary",  index=False)
         results["event_results"].to_excel(  writer, sheet_name="Event_Results",   index=False)
         export_df.to_excel(                 writer, sheet_name="All_Predictions", index=False)
-        for mkt, calib_df in results["calibration"].items():
-            calib_df.to_excel(writer, sheet_name=f"Calib_{mkt}"[:31], index=False)
 
-    if grid_df is not None and len(grid_df) > 0:
-        wb = load_workbook(out_path)
-        _write_grid_sheet(wb, grid_df)
-        wb.save(out_path)
+    wb = load_workbook(out_path)
+    if back_grid_df is not None and len(back_grid_df) > 0:
+        _write_grid_sheet(wb, back_grid_df,
+                          sheet_name="Back_Strategy_Grid",
+                          pnl_cols=["Total_PnL"],
+                          roi_cols=["ROI_%"])
+    if lay_grid_df is not None and len(lay_grid_df) > 0:
+        _write_grid_sheet(wb, lay_grid_df,
+                          sheet_name="Lay_Strategy_Grid",
+                          pnl_cols=["FL_Total_PnL", "FS_Total_PnL"],
+                          roi_cols=["FL_ROI_%", "FS_ROI_%"])
+    wb.save(out_path)
 
     print(f"\n  Saved: {out_path}")
     return out_path
@@ -923,9 +1231,10 @@ def run_tour(tour_key: str, tour_info: dict, n_trials: int,
             f"{row['TSS']:>6.4f}  £{row['Back_PnL']:>9.2f}  {row['Back_ROI']:>8.1%}"
         )
 
-    grid_df = run_grid_search(results["all_predictions"])
+    grid_back_df = run_back_grid_search(results["all_predictions"])
+    grid_lay_df  = run_lay_grid_search(results["all_predictions"])
 
-    return results, grid_df
+    return results, grid_back_df, grid_lay_df
 
 
 # ===== MAIN =====
@@ -957,8 +1266,8 @@ def main():
             force_retrain=args.force_retrain,
         )
         if outcome:
-            results, grid_df = outcome
-            export_results(results, tour_key, grid_df)
+            results, grid_back_df, grid_lay_df = outcome
+            export_results(results, tour_key, grid_back_df, grid_lay_df)
 
 
 if __name__ == "__main__":
