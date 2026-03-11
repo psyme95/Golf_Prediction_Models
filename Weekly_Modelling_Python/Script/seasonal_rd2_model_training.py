@@ -6,7 +6,7 @@ Trains a single ensemble for the Win market using Round 2 in-tournament features
 Same modelling approach as seasonal_model_training.py:
   - Optuna tuning per model (warm-starts from saved params)
   - RepeatedStratifiedKFold OOF predictions
-  - LogisticRegression meta-model using OOF scores + Betfair Rd2 odds
+  - LogisticRegression meta-model using OOF scores only (no implied odds)
 
 Input files (from shared R input directory):
   Full_{TOUR}_Historical_Predictions.xlsx  — historical model predictions + outcomes
@@ -20,27 +20,18 @@ Run: python seasonal_rd2_model_training.py
 
 import warnings
 from datetime import datetime
-from pathlib import Path
 
 import joblib
 import numpy as np
 import optuna
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss, roc_auc_score
-from sklearn.model_selection import RepeatedStratifiedKFold, StratifiedKFold, cross_val_score
-from sklearn.preprocessing import StandardScaler
-
-import lightgbm as lgb
-import xgboost as xgb
 
 from config import (
     MODELS_DIR,
     N_CV_REPEATS,
     N_CV_SPLITS,
     OPTUNA_TRIALS,
-    RANDOM_SEED,
     RD2_MODEL_VARS,
     SEASON_SUFFIX,
     TOUR_CONFIG,
