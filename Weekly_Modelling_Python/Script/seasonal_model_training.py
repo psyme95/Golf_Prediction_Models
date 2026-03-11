@@ -20,7 +20,6 @@ Key differences from R version:
 Run: python seasonal_model_training.py
 """
 
-import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -38,15 +37,6 @@ from sklearn.preprocessing import StandardScaler
 import lightgbm as lgb
 import xgboost as xgb
 
-try:
-    sys.path.insert(0, str(Path(__file__).parent))
-except NameError:
-    # IPython/Jupyter or PyCharm console: __file__ is unavailable.
-    # Search common locations relative to CWD (project root, Weekly_Modelling_Python, or Script).
-    _cwd = Path.cwd()
-    _candidates = [_cwd, _cwd / "Weekly_Modelling_Python" / "Script", _cwd / "Script"]
-    _script_dir = next((p for p in _candidates if (p / "config.py").exists()), _cwd)
-    sys.path.insert(0, str(_script_dir))
 from config import (
     BASE_MODEL_VARS,
     BETTING_MARKETS,
@@ -278,21 +268,98 @@ def build_final_models(model_configs: dict, X: np.ndarray, y: np.ndarray) -> dic
     return final
 
 
+# ===== MODEL CONFIGURATION =====
+
+def build_model_configs(logistic_params, rf_params, lgbm_params,
+                        xgb_params, dart_params, spw) -> dict:
+    """
+    Assemble the five-model configuration dict used by both seasonal and Rd2 training.
+    Each entry is (ModelClass, kwargs) consumed by generate_oof / build_final_models.
+    """
+    mf_map = {"sqrt": "sqrt", "log2": "log2", "frac03": 0.3, "frac05": 0.5}
+    rf_p = {k: v for k, v in rf_params.items() if k != "max_features"}
+    rf_p["max_features"] = mf_map.get(rf_params.get("max_features", "sqrt"), "sqrt")
+    return {
+        "logistic": (
+            LogisticRegression,
+            dict(**logistic_params, penalty="elasticnet", solver="saga",
+                 class_weight="balanced", max_iter=2000, random_state=RANDOM_SEED),
+        ),
+        "rf": (
+            RandomForestClassifier,
+            dict(**rf_p, class_weight="balanced", n_jobs=-1, random_state=RANDOM_SEED),
+        ),
+        "lgbm": (
+            lgb.LGBMClassifier,
+            dict(**lgbm_params, class_weight="balanced",
+                 random_state=RANDOM_SEED, verbose=-1),
+        ),
+        "xgb": (
+            xgb.XGBClassifier,
+            dict(**xgb_params, scale_pos_weight=spw, eval_metric="logloss",
+                 use_label_encoder=False, random_state=RANDOM_SEED, verbosity=0),
+        ),
+        "lgbm_dart": (
+            lgb.LGBMClassifier,
+            dict(**dart_params, boosting_type="dart", class_weight="balanced",
+                 random_state=RANDOM_SEED, verbose=-1),
+        ),
+    }
+
+
 # ===== META-MODEL (calibration + weighting) =====
 
-def fit_meta_model(oof_matrix, y, odds, seed=RANDOM_SEED):
+def fit_meta_model(oof_matrix, y, odds=None, seed=RANDOM_SEED):
     """
-    LogisticRegression on OOF predictions + implied probability (1/odds).
-    Learns ensemble weights and calibrates probabilities, incorporating
-    market consensus as an additional signal alongside player-skill scores.
+    LogisticRegression on OOF predictions, optionally incorporating implied
+    probability (1/odds) as an additional calibration signal.
+
+    odds=None: meta-model trained on base model scores only (used for Rd2).
+    odds=array: implied probability appended as an extra feature (standard markets).
     """
-    imp_prob = (1.0 / odds.clip(1e-8)).reshape(-1, 1)
-    meta_X = np.hstack([oof_matrix, imp_prob])
+    if odds is not None:
+        imp_prob = (1.0 / odds.clip(1e-8)).reshape(-1, 1)
+        meta_X = np.hstack([oof_matrix, imp_prob])
+    else:
+        meta_X = oof_matrix
     scaler = StandardScaler()
     meta_X_scaled = scaler.fit_transform(meta_X)
     meta = LogisticRegression(C=1.0, max_iter=2000, random_state=seed)
     meta.fit(meta_X_scaled, y)
     return meta, scaler
+
+
+# ===== ENSEMBLE PREDICTION =====
+
+def ensemble_predict(market_pkg: dict, X: np.ndarray, odds: np.ndarray = None):
+    """
+    Run base models through the trained meta-model to produce calibrated probabilities.
+
+    Args:
+        market_pkg: trained market package with 'models', 'meta_scaler', 'meta_model'.
+        X:          feature matrix (n_players × n_features).
+        odds:       lay/market odds array (n_players,). When provided, implied probability
+                    (1/odds) is appended to the meta-model input — matching how the
+                    meta-model was trained. Pass None for Rd2 models, which were trained
+                    without the odds feature.
+
+    Returns:
+        (proba, raw_score): calibrated probabilities and mean base-model score.
+    """
+    model_preds = np.column_stack([
+        m.predict_proba(X)[:, 1] for m in market_pkg["models"].values()
+    ])
+    raw_score = model_preds.mean(axis=1)
+
+    if odds is not None:
+        imp_prob = (1.0 / odds.clip(1e-8)).reshape(-1, 1)
+        meta_X   = np.hstack([model_preds, imp_prob])
+    else:
+        meta_X = model_preds
+
+    meta_X_scaled = market_pkg["meta_scaler"].transform(meta_X)
+    proba = market_pkg["meta_model"].predict_proba(meta_X_scaled)[:, 1]
+    return proba, raw_score
 
 
 # ===== MARKET TRAINING FUNCTION =====
@@ -347,36 +414,9 @@ def train_market(market_name, market_config, train_df, tour_key, model_vars):
         joblib.dump(params, MODELS_DIR / f"{tour_key}_{market_name}_{name}_best_params.pkl")
 
     # --- Build model configurations ---
-    mf_map = {"sqrt": "sqrt", "log2": "log2", "frac03": 0.3, "frac05": 0.5}
-    rf_p = {k: v for k, v in rf_params.items() if k != "max_features"}
-    rf_p["max_features"] = mf_map.get(rf_params.get("max_features", "sqrt"), "sqrt")
-
-    model_configs = {
-        "logistic": (
-            LogisticRegression,
-            dict(**logistic_params, penalty="elasticnet", solver="saga",
-                 class_weight="balanced", max_iter=2000, random_state=RANDOM_SEED),
-        ),
-        "rf": (
-            RandomForestClassifier,
-            dict(**rf_p, class_weight="balanced", n_jobs=-1, random_state=RANDOM_SEED),
-        ),
-        "lgbm": (
-            lgb.LGBMClassifier,
-            dict(**lgbm_params, class_weight="balanced",
-                 random_state=RANDOM_SEED, verbose=-1),
-        ),
-        "xgb": (
-            xgb.XGBClassifier,
-            dict(**xgb_params, scale_pos_weight=spw, eval_metric="logloss",
-                 use_label_encoder=False, random_state=RANDOM_SEED, verbosity=0),
-        ),
-        "lgbm_dart": (
-            lgb.LGBMClassifier,
-            dict(**dart_params, boosting_type="dart", class_weight="balanced",
-                 random_state=RANDOM_SEED, verbose=-1),
-        ),
-    }
+    model_configs = build_model_configs(
+        logistic_params, rf_params, lgbm_params, xgb_params, dart_params, spw
+    )
 
     # --- OOF predictions ---
     print(f"    Generating OOF predictions "

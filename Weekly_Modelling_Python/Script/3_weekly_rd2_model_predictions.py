@@ -20,7 +20,6 @@ Output columns match R output for direct comparison:
 Run: python 3_weekly_rd2_model_predictions.py
 """
 
-import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -29,15 +28,6 @@ import joblib
 import numpy as np
 import pandas as pd
 
-try:
-    sys.path.insert(0, str(Path(__file__).parent))
-except NameError:
-    # IPython/Jupyter or PyCharm console: __file__ is unavailable.
-    # Search common locations relative to CWD (project root, Weekly_Modelling_Python, or Script).
-    _cwd = Path.cwd()
-    _candidates = [_cwd, _cwd / "Weekly_Modelling_Python" / "Script", _cwd / "Script"]
-    _script_dir = next((p for p in _candidates if (p / "config.py").exists()), _cwd)
-    sys.path.insert(0, str(_script_dir))
 from config import (
     MODELS_DIR,
     PREDICTIONS_DIR,
@@ -45,6 +35,7 @@ from config import (
     SEASON_SUFFIX,
     TOUR_CONFIG,
 )
+from seasonal_model_training import ensemble_predict
 
 warnings.filterwarnings("ignore")
 
@@ -97,16 +88,8 @@ def predict_rd2(df: pd.DataFrame, model_pkg: dict) -> pd.DataFrame:
     X    = df[available].values.astype(float)
     odds = df["Betfair_rd2"].values.astype(float)
 
-    # Individual model predictions
-    model_preds = np.column_stack([
-        m.predict_proba(X)[:, 1]
-        for m in model_pkg["models"].values()
-    ])
-    raw_score = model_preds.mean(axis=1)
-
-    # Meta-model calibration (OOF-trained, skill signals only)
-    meta_X_scaled = model_pkg["meta_scaler"].transform(model_preds)
-    calibrated_prob = model_pkg["meta_model"].predict_proba(meta_X_scaled)[:, 1]
+    # Rd2 models were trained without implied probability — pass odds=None
+    calibrated_prob, raw_score = ensemble_predict(model_pkg, X)
 
     # Tournament-level normalisation (win market: probabilities sum to 1)
     prob_sum     = calibrated_prob.sum()

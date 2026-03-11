@@ -104,14 +104,6 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-try:
-    sys.path.insert(0, str(Path(__file__).parent))
-except NameError:
-    _cwd = Path.cwd()
-    _candidates = [_cwd, _cwd / "Weekly_Modelling_Python" / "Script", _cwd / "Script"]
-    _script_dir = next((p for p in _candidates if (p / "seasonal_model_training.py").exists()), _cwd)
-    sys.path.insert(0, str(_script_dir))
-
 import seasonal_model_training as smt
 
 from config import (
@@ -221,14 +213,7 @@ def predict_event(event_df: pd.DataFrame, market_name: str,
     X    = df[available].values.astype(float)
     odds = df[odds_col].values.astype(float)
 
-    model_preds = np.column_stack([
-        m.predict_proba(X)[:, 1] for m in market_pkg["models"].values()
-    ])
-    raw_score = model_preds.mean(axis=1)
-
-    imp_prob      = (1.0 / odds.clip(1e-8)).reshape(-1, 1)
-    meta_X_scaled = market_pkg["meta_scaler"].transform(np.hstack([model_preds, imp_prob]))
-    proba         = market_pkg["meta_model"].predict_proba(meta_X_scaled)[:, 1]
+    proba, raw_score = smt.ensemble_predict(market_pkg, X, odds)
 
     market_size = market_pkg["market_size"]
     prob_sum    = proba.sum()

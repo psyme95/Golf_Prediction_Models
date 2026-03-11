@@ -9,21 +9,11 @@ Run order: this script first, then seasonal_model_training.py or
            2_weekly_model_predictions.py.
 """
 
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-try:
-    sys.path.insert(0, str(Path(__file__).parent))
-except NameError:
-    # IPython/Jupyter or PyCharm console: __file__ is unavailable.
-    # Search common locations relative to CWD (project root, Weekly_Modelling_Python, or Script).
-    _cwd = Path.cwd()
-    _candidates = [_cwd, _cwd / "Weekly_Modelling_Python" / "Script", _cwd / "Script"]
-    _script_dir = next((p for p in _candidates if (p / "config.py").exists()), _cwd)
-    sys.path.insert(0, str(_script_dir))
 from config import (
     HISTORICAL_ONLY_COLS,
     INPUT_DIR,
