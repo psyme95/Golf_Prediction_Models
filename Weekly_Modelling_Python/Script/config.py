@@ -9,6 +9,7 @@ Path conventions:
   PREDICTIONS_DIR   - weekly prediction Excel files
 """
 
+import sys
 from pathlib import Path
 
 # ===== PATHS =====
@@ -20,6 +21,12 @@ except NameError:
     _cwd = Path.cwd()
     _candidates = [_cwd, _cwd / "Weekly_Modelling_Python" / "Script", _cwd / "Script"]
     SCRIPT_DIR = next((p for p in _candidates if (p / "config.py").exists()), _cwd)
+
+# Ensure the Script directory is importable from any working directory.
+# Jupyter / IPython users: if this import fails first time, run:
+#   import sys; sys.path.insert(0, "/path/to/Weekly_Modelling_Python/Script")
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 BASE_DIR = SCRIPT_DIR.parent                                        # Weekly_Modelling_Python/
 SHARED_INPUT_DIR = BASE_DIR.parent / "Weekly_Modelling" / "Input"  # Raw data shared with R
 INPUT_DIR = BASE_DIR / "Input"                                      # Python-processed data

@@ -104,14 +104,6 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-try:
-    sys.path.insert(0, str(Path(__file__).parent))
-except NameError:
-    _cwd = Path.cwd()
-    _candidates = [_cwd, _cwd / "Weekly_Modelling_Python" / "Script", _cwd / "Script"]
-    _script_dir = next((p for p in _candidates if (p / "seasonal_model_training.py").exists()), _cwd)
-    sys.path.insert(0, str(_script_dir))
-
 import seasonal_model_training as smt
 
 from config import (
