@@ -309,19 +309,13 @@ def build_model_configs(logistic_params, rf_params, lgbm_params,
 
 # ===== META-MODEL (calibration + weighting) =====
 
-def fit_meta_model(oof_matrix, y, odds=None, seed=RANDOM_SEED):
+def fit_meta_model(oof_matrix, y, seed=RANDOM_SEED):
     """
-    LogisticRegression on OOF predictions, optionally incorporating implied
-    probability (1/odds) as an additional calibration signal.
-
-    odds=None: meta-model trained on base model scores only (used for Rd2).
-    odds=array: implied probability appended as an extra feature (standard markets).
+    LogisticRegression on OOF predictions from base models only.
+    Market odds are excluded from the meta-model to avoid data leakage
+    and because empirical testing showed worse outcomes when included.
     """
-    if odds is not None:
-        imp_prob = (1.0 / odds.clip(1e-8)).reshape(-1, 1)
-        meta_X = np.hstack([oof_matrix, imp_prob])
-    else:
-        meta_X = oof_matrix
+    meta_X = oof_matrix
     scaler = StandardScaler()
     meta_X_scaled = scaler.fit_transform(meta_X)
     meta = LogisticRegression(C=1.0, max_iter=2000, random_state=seed)
@@ -331,17 +325,13 @@ def fit_meta_model(oof_matrix, y, odds=None, seed=RANDOM_SEED):
 
 # ===== ENSEMBLE PREDICTION =====
 
-def ensemble_predict(market_pkg: dict, X: np.ndarray, odds: np.ndarray = None):
+def ensemble_predict(market_pkg: dict, X: np.ndarray):
     """
     Run base models through the trained meta-model to produce calibrated probabilities.
 
     Args:
         market_pkg: trained market package with 'models', 'meta_scaler', 'meta_model'.
         X:          feature matrix (n_players × n_features).
-        odds:       lay/market odds array (n_players,). When provided, implied probability
-                    (1/odds) is appended to the meta-model input — matching how the
-                    meta-model was trained. Pass None for Rd2 models, which were trained
-                    without the odds feature.
 
     Returns:
         (proba, raw_score): calibrated probabilities and mean base-model score.
@@ -351,13 +341,7 @@ def ensemble_predict(market_pkg: dict, X: np.ndarray, odds: np.ndarray = None):
     ])
     raw_score = model_preds.mean(axis=1)
 
-    if odds is not None:
-        imp_prob = (1.0 / odds.clip(1e-8)).reshape(-1, 1)
-        meta_X   = np.hstack([model_preds, imp_prob])
-    else:
-        meta_X = model_preds
-
-    meta_X_scaled = market_pkg["meta_scaler"].transform(meta_X)
+    meta_X_scaled = market_pkg["meta_scaler"].transform(model_preds)
     proba = market_pkg["meta_model"].predict_proba(meta_X_scaled)[:, 1]
     return proba, raw_score
 
@@ -376,10 +360,9 @@ def train_market(market_name, market_config, train_df, tour_key, model_vars):
     if missing:
         print(f"    Warning: missing vars (skipped): {missing}")
 
-    df = train_df[available_vars + [target_col, odds_col]].dropna()
+    df = train_df[available_vars + [target_col]].dropna()
     X   = df[available_vars].values.astype(float)
     y   = df[target_col].values.astype(int)
-    odds = df[odds_col].values.astype(float)
 
     n_pos = int(y.sum())
     n_neg = int((y == 0).sum())
@@ -436,7 +419,7 @@ def train_market(market_name, market_config, train_df, tour_key, model_vars):
         print(f"      {name:12s}  log_loss={ll:.4f}  AUC={auc:.4f}  AP={ap:.4f}  TSS={tss:.4f}")
 
     # --- Meta-model (calibration) ---
-    meta_model, meta_scaler = fit_meta_model(oof_matrix, y, odds)
+    meta_model, meta_scaler = fit_meta_model(oof_matrix, y)
 
     # --- Final models on full data ---
     print("    Fitting final models on full training data...")

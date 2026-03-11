@@ -47,9 +47,8 @@ def predict_market(market_name: str, market_pkg: dict, newdat: pd.DataFrame) -> 
     df = newdat[available + [odds_col]].copy()
     df = df.dropna()
     X    = df[available].values.astype(float)
-    odds = df[odds_col].values.astype(float)
 
-    proba, raw_score = ensemble_predict(market_pkg, X, odds)
+    proba, raw_score = ensemble_predict(market_pkg, X)
 
     # Tournament-level normalisation: probabilities sum to market_size
     market_size = market_pkg["market_size"]

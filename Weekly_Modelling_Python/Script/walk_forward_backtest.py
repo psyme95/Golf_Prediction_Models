@@ -211,9 +211,8 @@ def predict_event(event_df: pd.DataFrame, market_name: str,
         return None
 
     X    = df[available].values.astype(float)
-    odds = df[odds_col].values.astype(float)
 
-    proba, raw_score = smt.ensemble_predict(market_pkg, X, odds)
+    proba, raw_score = smt.ensemble_predict(market_pkg, X)
 
     market_size = market_pkg["market_size"]
     prob_sum    = proba.sum()
