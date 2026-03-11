@@ -53,14 +53,16 @@ def get_market_vars(market_config: dict) -> list:
 def ensemble_predict(market_pkg: dict, X: np.ndarray, odds: np.ndarray) -> np.ndarray:
     """
     1. Get predictions from each base model.
-    2. Stack with implied odds as meta-features.
+    2. Append implied probability (1/odds) as an extra meta-feature.
     3. Apply meta-model to produce calibrated probabilities.
     """
     model_preds = np.column_stack([
         model.predict_proba(X)[:, 1]
         for model in market_pkg["models"].values()
     ])
-    meta_X_scaled = market_pkg["meta_scaler"].transform(model_preds)
+    imp_prob = (1.0 / odds.clip(1e-8)).reshape(-1, 1)
+    meta_X = np.hstack([model_preds, imp_prob])
+    meta_X_scaled = market_pkg["meta_scaler"].transform(meta_X)
     return (
         market_pkg["meta_model"].predict_proba(meta_X_scaled)[:, 1],
         model_preds.mean(axis=1),   # raw model score (mean of individual model probs)

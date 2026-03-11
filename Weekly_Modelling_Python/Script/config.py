@@ -39,9 +39,9 @@ N_CV_SPLITS = 5      # folds for RepeatedStratifiedKFold OOF
 N_CV_REPEATS = 5     # repeats  → 25 OOF fits per model per market
 
 # ===== BETTING MARKETS =====
-# odds_col: retained for EV/edge calculations at prediction time only.
-# Odds are NOT used as base model features or in meta-model calibration —
-# all model signals are pure player-skill metrics.
+# odds_col: used as implied probability (1/odds) in the meta-model calibration
+# layer, and for EV/edge calculations at prediction time.
+# Odds are NOT used as base model features — base models use pure player-skill metrics.
 BETTING_MARKETS = {
     "Winner": {
         "target_col": "win",

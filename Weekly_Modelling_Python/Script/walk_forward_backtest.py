@@ -226,7 +226,8 @@ def predict_event(event_df: pd.DataFrame, market_name: str,
     ])
     raw_score = model_preds.mean(axis=1)
 
-    meta_X_scaled = market_pkg["meta_scaler"].transform(model_preds)
+    imp_prob      = (1.0 / odds.clip(1e-8)).reshape(-1, 1)
+    meta_X_scaled = market_pkg["meta_scaler"].transform(np.hstack([model_preds, imp_prob]))
     proba         = market_pkg["meta_model"].predict_proba(meta_X_scaled)[:, 1]
 
     market_size = market_pkg["market_size"]
