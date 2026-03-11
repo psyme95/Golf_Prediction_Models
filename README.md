@@ -23,7 +23,6 @@ Golf_Prediction_Models/
 │       ├── seasonal_model_training.py
 │       ├── seasonal_rd2_model_training.py
 │       ├── walk_forward_backtest.py
-│       └── backtest_grid.py
 └── Testing Scripts/
 ```
 
@@ -51,7 +50,6 @@ Golf_Prediction_Models/
 | Script | What it does |
 |--------|--------------|
 | `walk_forward_backtest.py` | Rolling 2-year train → 1-year test windows across all available data. Trains from scratch per window (warm-starts between adjacent windows). P&L uses Betfair Lay odds with dead-heat adjustment for place markets. |
-| `backtest_grid.py` | Sweeps edge/stake thresholds across backtest output to find optimal strategy parameters. |
 
 ---
 
@@ -110,7 +108,6 @@ python 3_weekly_rd2_model_predictions.py
 
 # Backtesting
 python walk_forward_backtest.py
-python backtest_grid.py
 ```
 
 Scripts can also be run from any working directory — `config.py` resolves paths relative to its own location, including Jupyter/IPython environments.
