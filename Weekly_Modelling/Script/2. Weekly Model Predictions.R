@@ -39,48 +39,15 @@ BASE_MODEL_VARS <- c("rating_vs_field_best",
                      "location", 
                      "field")
 
-# Define betting markets configuration
+# Define betting markets configuration.
+# Odds columns are intentionally excluded from all model layers —
+# empirical testing showed worse outcomes when implied probability
+# was included as a model feature.
 BETTING_MARKETS <- list(
-  "Winner" = list(
-    target_col = "win", 
-    odds_col = "Win_odds", 
-    model_odds_cols = c("Win_odds", "Top5_odds"),
-    market_size = 1
-  ),
-  "Top5" = list(
-    target_col = "top_5", 
-    odds_col = "Top5_odds", 
-    model_odds_cols = c("Top5_odds", "Top10_odds"),
-    market_size = 5
-  ),
-  "Top10" = list(
-    target_col = "top_10", 
-    odds_col = "Top10_odds", 
-    model_odds_cols = c("Top10_odds", "Top20_odds"),
-    market_size = 10
-  ),
-  "Top20" = list(
-    target_col = "top_20", 
-    odds_col = "Top20_odds", 
-    model_odds_cols = c("Top20_odds"),
-    market_size = 20
-  )
-)
-
-# Tour-specific calibration method preferences (must match training script)
-CALIBRATION_METHODS <- list(
-  PGA = list(
-    "Winner" = "glm_odds",
-    "Top5" = "platt",
-    "Top10" = "glm_prob", 
-    "Top20" = "platt"
-  ),
-  Euro = list(
-    "Winner" = "glm_odds",
-    "Top5" = "glm_prob",
-    "Top10" = "glm_prob",
-    "Top20" = "platt"
-  )
+  "Winner" = list(target_col = "win",   odds_col = "Win_odds",  market_size = 1),
+  "Top5"   = list(target_col = "top_5", odds_col = "Top5_odds", market_size = 5),
+  "Top10"  = list(target_col = "top_10", odds_col = "Top10_odds", market_size = 10),
+  "Top20"  = list(target_col = "top_20", odds_col = "Top20_odds", market_size = 20)
 )
 
 # ===== HELPER FUNCTIONS =====
@@ -90,11 +57,12 @@ predict_platt_scaling <- function(scores, platt_params) {
   1 / (1 + exp(platt_params$A * scores + platt_params$B))
 }
 
-# Get market-specific model variables
+# Get market-specific model variables.
+# Odds columns are excluded from all model layers — they are only used for
+# EV/edge calculations at prediction time.
 get_market_model_vars <- function(market_config, base_model_vars) {
   base_vars_no_odds <- base_model_vars[!base_model_vars %in% c("Win_odds", "Top5_odds", "Top10_odds", "Top20_odds")]
-  market_specific_vars <- c(base_vars_no_odds, market_config$model_odds_cols)
-  return(market_specific_vars)
+  return(base_vars_no_odds)
 }
 
 # ===== PREDICTION FUNCTIONS =====
@@ -144,49 +112,10 @@ predict_single_run <- function(ensemble_model, calibration_models, newdat, marke
     model_score = model_scores,
     market_odds = newdat[[market_config$odds_col]]
   )
-  
-  # Apply all three calibration methods
-  # 1. GLM with odds
-  if (!is.null(calibration_models$glm_odds)) {
-    calib_data_odds <- data.frame(
-      training_scores = model_scores,
-      training_odds = newdat[[market_config$odds_col]]
-    )
-    results$prob_glm_odds <- predict(calibration_models$glm_odds, 
-                                     calib_data_odds, 
-                                     type = "response")
-  }
-  
-  # 2. GLM with implied probability  
-  if (!is.null(calibration_models$glm_prob)) {
-    calib_data_prob <- data.frame(
-      training_scores = model_scores,
-      training_implied_prob = 1 / newdat[[market_config$odds_col]]
-    )
-    results$prob_glm_prob <- predict(calibration_models$glm_prob,
-                                     calib_data_prob,
-                                     type = "response")
-  }
-  
-  # 3. Platt scaling
-  if (!is.null(calibration_models$platt)) {
-    results$prob_platt <- predict_platt_scaling(model_scores, 
-                                                calibration_models$platt)
-  }
-  
-  # Select the preferred calibration method for this tour/market
-  preferred_method <- CALIBRATION_METHODS[[tour_key]][[market_name]]
-  
-  if (preferred_method == "glm_odds") {
-    results$final_probability <- results$prob_glm_odds
-  } else if (preferred_method == "glm_prob") {
-    results$final_probability <- results$prob_glm_prob
-  } else if (preferred_method == "platt") {
-    results$final_probability <- results$prob_platt
-  }
-  
-  results$calibration_method <- preferred_method
-  
+
+  # Apply Platt scaling calibration (odds excluded from all model layers)
+  results$final_probability <- predict_platt_scaling(model_scores, calibration_models$platt)
+
   return(results)
 }
 
@@ -447,13 +376,6 @@ if (length(all_tour_results) > 0) {
     }
   }
   
-  cat("\n=== Calibration Methods Used ===\n")
-  for (tour_key in names(CALIBRATION_METHODS)) {
-    cat(tour_key, ":\n")
-    for (market in names(CALIBRATION_METHODS[[tour_key]])) {
-      cat("  ", market, ":", CALIBRATION_METHODS[[tour_key]][[market]], "\n")
-    }
-  }
 } else {
   cat("\nNo predictions were generated. Please check:\n")
   cat("1. Model files exist in ./Output/Models/\n")

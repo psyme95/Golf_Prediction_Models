@@ -23,28 +23,15 @@ TOUR_CONFIG <- list(
 
 start_time <- Sys.time()
 
-# Define betting markets to process with tour-specific calibration methods
+# Define betting markets to process.
+# Odds columns are intentionally excluded from all model layers —
+# empirical testing showed worse outcomes when implied probability
+# was included as a model feature.
 BETTING_MARKETS <- list(
-  "Winner" = list(target_col = "win", odds_col = "Win_odds", position_threshold = 1, model_odds_cols = c("Win_odds", "Top5_odds"), market_size = 1),
-  "Top5" = list(target_col = "top_5", odds_col = "Top5_odds", position_threshold = 5, model_odds_cols = c("Top5_odds", "Top10_odds"), market_size = 5),
-  "Top10" = list(target_col = "top_10", odds_col = "Top10_odds", position_threshold = 10, model_odds_cols = c("Top10_odds", "Top20_odds"), market_size = 10),
-  "Top20" = list(target_col = "top_20", odds_col = "Top20_odds", position_threshold = 20, model_odds_cols = c("Top20_odds"), market_size = 20)
-)
-
-# Tour-specific calibration method preferences
-CALIBRATION_METHODS <- list(
-  PGA = list(
-    "Winner" = "glm_odds",
-    "Top5" = "platt",
-    "Top10" = "glm_prob",
-    "Top20" = "platt"
-  ),
-  Euro = list(
-    "Winner" = "glm_odds",
-    "Top5" = "glm_prob",
-    "Top10" = "glm_prob",
-    "Top20" = "platt"
-  )
+  "Winner" = list(target_col = "win", odds_col = "Win_odds", position_threshold = 1, market_size = 1),
+  "Top5"   = list(target_col = "top_5", odds_col = "Top5_odds", position_threshold = 5, market_size = 5),
+  "Top10"  = list(target_col = "top_10", odds_col = "Top10_odds", position_threshold = 10, market_size = 10),
+  "Top20"  = list(target_col = "top_20", odds_col = "Top20_odds", position_threshold = 20, market_size = 20)
 )
 
 # ===== TOURNAMENT DETECTION FUNCTIONS =====
@@ -246,30 +233,16 @@ train_ensemble_model_with_calibration <- function(train_data, model_vars, target
   # Get training predictions for calibration fitting
   training_scores <- myBiomodEM@models.prediction@val$pred
   training_labels <- train_data[[target_variable]]
-  training_odds <- train_data[[market_config$odds_col]]
-  training_implied_prob <- 1 / training_odds
-  
-  # Fit all three calibration methods
-  cat("    Fitting calibration models...\n")
-  
-  # 1. GLM with odds
-  calibration_model_glm_odds <- glm(training_labels ~ training_scores + training_odds,
-                                    family = binomial())
-  
-  # 2. GLM with implied probability
-  calibration_model_glm_prob <- glm(training_labels ~ training_scores + training_implied_prob,
-                                    family = binomial())
-  
-  # 3. Platt scaling
+
+  # Fit Platt scaling calibration (no odds — odds excluded from all model layers)
+  cat("    Fitting calibration model (Platt scaling)...\n")
   platt_params <- apply_platt_scaling(training_scores, training_labels)
-  
+
   calibration_models <- list(
-    glm_odds = calibration_model_glm_odds,
-    glm_prob = calibration_model_glm_prob,
     platt = platt_params
   )
-  
-  cat("    Calibration models fitted successfully\n")
+
+  cat("    Calibration model fitted successfully\n")
   
   # Get model evaluation metrics
   ensemble_eval <- get_evaluations(myBiomodEM)
@@ -329,15 +302,12 @@ get_training_data <- function(df_historical, training_years, available_vars) {
   return(list(train_data = train_data, training_events = unique_events))
 }
 
-# Function to get market-specific model variables
+# Function to get market-specific model variables.
+# Odds columns are excluded from all model layers — they are only used for
+# EV/edge calculations at prediction time.
 get_market_model_vars <- function(market_config, base_model_vars) {
-  # Start with base variables (excluding odds columns)
   base_vars_no_odds <- base_model_vars[!base_model_vars %in% c("Win_odds", "Top5_odds", "Top10_odds", "Top20_odds")]
-  
-  # Add market-specific odds columns
-  market_specific_vars <- c(base_vars_no_odds, market_config$model_odds_cols)
-  
-  return(market_specific_vars)
+  return(base_vars_no_odds)
 }
 
 # Process single betting market for training only
@@ -358,12 +328,9 @@ process_betting_market_training <- function(market_name, market_config, train_da
   
   MODEL_NAME <- paste0(tour_name, "_", market_name, "_Run", run_number, "_", MODEL_SUFFIX)
   
-  # Train the ensemble model with calibration models
+  # Train the ensemble model with Platt calibration
   trained_result <- train_ensemble_model_with_calibration(train_data, available_market_vars, market_config$target_col, market_config)
-  
-  # Determine which calibration method is preferred for this tour/market combination
-  selected_method <- CALIBRATION_METHODS[[tour_key]][[market_name]]
-  
+
   return(list(
     model_name = MODEL_NAME,
     ensemble_model = trained_result$ensemble_model,
@@ -371,7 +338,6 @@ process_betting_market_training <- function(market_name, market_config, train_da
     individual_models = trained_result$individual_models,
     metrics = trained_result$metrics,
     ensemble_metrics = trained_result$ensemble_metrics,
-    selected_calibration = selected_method,
     training_size = trained_result$training_size
   ))
 }
@@ -380,17 +346,8 @@ process_betting_market_training <- function(market_name, market_config, train_da
 process_betting_market_training_averaged <- function(market_name, market_config, train_data, base_model_vars, training_events, tour_name, tour_key) {
   
   cat("\n=== TRAINING", market_name, "MARKET WITH", NUMBER_OF_RUNS, "RUNS ===\n")
-  
-  # Get the calibration method for this tour/market combination
-  selected_method <- CALIBRATION_METHODS[[tour_key]][[market_name]]
-  method_display_names <- list(
-    "glm_odds" = "GLM with Market Odds",
-    "glm_prob" = "GLM with Implied Probability", 
-    "platt" = "Platt Scaling"
-  )
-  
-  cat("Preferred calibration method:", method_display_names[[selected_method]], "\n")
-  
+  cat("Calibration: Platt Scaling (odds excluded from all model layers)\n")
+
   # Store results from each run
   run_results <- list()
   
@@ -417,7 +374,6 @@ process_betting_market_training_averaged <- function(market_name, market_config,
     market_name = market_name,
     run_results = run_results,
     number_of_runs = length(run_results),
-    preferred_calibration = selected_method,
     market_size = market_config$market_size
   ))
 }
@@ -489,8 +445,7 @@ process_tournament_training <- function(tour_key, tour_info, base_model_vars) {
           Training_Size = run_data$training_size,
           Mean_TSS = mean(tss_scores, na.rm = TRUE),
           Max_TSS = max(tss_scores, na.rm = TRUE),
-          Min_TSS = min(tss_scores, na.rm = TRUE),
-          Preferred_Calibration = run_data$selected_calibration
+          Min_TSS = min(tss_scores, na.rm = TRUE)
         )
         
         training_summary <- rbind(training_summary, summary_row)

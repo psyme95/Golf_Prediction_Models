@@ -455,8 +455,9 @@ def get_training_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_market_vars(market_config: dict) -> list:
-    """Base vars only — market odds are excluded from base model features.
-    Implied probability (1/odds) is appended to the meta-model input instead."""
+    """Base vars only — market odds are excluded from all model layers
+    (base models and meta-model). Empirical testing showed worse outcomes
+    when implied probability was included as a model feature."""
     odds_cols = {"Win_odds", "Top5_odds", "Top10_odds", "Top20_odds"}
     return [v for v in BASE_MODEL_VARS if v not in odds_cols]
 
