@@ -268,16 +268,60 @@ def build_final_models(model_configs: dict, X: np.ndarray, y: np.ndarray) -> dic
     return final
 
 
+# ===== MODEL CONFIGURATION =====
+
+def build_model_configs(logistic_params, rf_params, lgbm_params,
+                        xgb_params, dart_params, spw) -> dict:
+    """
+    Assemble the five-model configuration dict used by both seasonal and Rd2 training.
+    Each entry is (ModelClass, kwargs) consumed by generate_oof / build_final_models.
+    """
+    mf_map = {"sqrt": "sqrt", "log2": "log2", "frac03": 0.3, "frac05": 0.5}
+    rf_p = {k: v for k, v in rf_params.items() if k != "max_features"}
+    rf_p["max_features"] = mf_map.get(rf_params.get("max_features", "sqrt"), "sqrt")
+    return {
+        "logistic": (
+            LogisticRegression,
+            dict(**logistic_params, penalty="elasticnet", solver="saga",
+                 class_weight="balanced", max_iter=2000, random_state=RANDOM_SEED),
+        ),
+        "rf": (
+            RandomForestClassifier,
+            dict(**rf_p, class_weight="balanced", n_jobs=-1, random_state=RANDOM_SEED),
+        ),
+        "lgbm": (
+            lgb.LGBMClassifier,
+            dict(**lgbm_params, class_weight="balanced",
+                 random_state=RANDOM_SEED, verbose=-1),
+        ),
+        "xgb": (
+            xgb.XGBClassifier,
+            dict(**xgb_params, scale_pos_weight=spw, eval_metric="logloss",
+                 use_label_encoder=False, random_state=RANDOM_SEED, verbosity=0),
+        ),
+        "lgbm_dart": (
+            lgb.LGBMClassifier,
+            dict(**dart_params, boosting_type="dart", class_weight="balanced",
+                 random_state=RANDOM_SEED, verbose=-1),
+        ),
+    }
+
+
 # ===== META-MODEL (calibration + weighting) =====
 
-def fit_meta_model(oof_matrix, y, odds, seed=RANDOM_SEED):
+def fit_meta_model(oof_matrix, y, odds=None, seed=RANDOM_SEED):
     """
-    LogisticRegression on OOF predictions + implied probability (1/odds).
-    Learns ensemble weights and calibrates probabilities, incorporating
-    market consensus as an additional signal alongside player-skill scores.
+    LogisticRegression on OOF predictions, optionally incorporating implied
+    probability (1/odds) as an additional calibration signal.
+
+    odds=None: meta-model trained on base model scores only (used for Rd2).
+    odds=array: implied probability appended as an extra feature (standard markets).
     """
-    imp_prob = (1.0 / odds.clip(1e-8)).reshape(-1, 1)
-    meta_X = np.hstack([oof_matrix, imp_prob])
+    if odds is not None:
+        imp_prob = (1.0 / odds.clip(1e-8)).reshape(-1, 1)
+        meta_X = np.hstack([oof_matrix, imp_prob])
+    else:
+        meta_X = oof_matrix
     scaler = StandardScaler()
     meta_X_scaled = scaler.fit_transform(meta_X)
     meta = LogisticRegression(C=1.0, max_iter=2000, random_state=seed)
@@ -370,36 +414,9 @@ def train_market(market_name, market_config, train_df, tour_key, model_vars):
         joblib.dump(params, MODELS_DIR / f"{tour_key}_{market_name}_{name}_best_params.pkl")
 
     # --- Build model configurations ---
-    mf_map = {"sqrt": "sqrt", "log2": "log2", "frac03": 0.3, "frac05": 0.5}
-    rf_p = {k: v for k, v in rf_params.items() if k != "max_features"}
-    rf_p["max_features"] = mf_map.get(rf_params.get("max_features", "sqrt"), "sqrt")
-
-    model_configs = {
-        "logistic": (
-            LogisticRegression,
-            dict(**logistic_params, penalty="elasticnet", solver="saga",
-                 class_weight="balanced", max_iter=2000, random_state=RANDOM_SEED),
-        ),
-        "rf": (
-            RandomForestClassifier,
-            dict(**rf_p, class_weight="balanced", n_jobs=-1, random_state=RANDOM_SEED),
-        ),
-        "lgbm": (
-            lgb.LGBMClassifier,
-            dict(**lgbm_params, class_weight="balanced",
-                 random_state=RANDOM_SEED, verbose=-1),
-        ),
-        "xgb": (
-            xgb.XGBClassifier,
-            dict(**xgb_params, scale_pos_weight=spw, eval_metric="logloss",
-                 use_label_encoder=False, random_state=RANDOM_SEED, verbosity=0),
-        ),
-        "lgbm_dart": (
-            lgb.LGBMClassifier,
-            dict(**dart_params, boosting_type="dart", class_weight="balanced",
-                 random_state=RANDOM_SEED, verbose=-1),
-        ),
-    }
+    model_configs = build_model_configs(
+        logistic_params, rf_params, lgbm_params, xgb_params, dart_params, spw
+    )
 
     # --- OOF predictions ---
     print(f"    Generating OOF predictions "

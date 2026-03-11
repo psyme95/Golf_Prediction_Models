@@ -49,6 +49,7 @@ from config import (
 # Re-use tuning and OOF helpers from the main training module
 from seasonal_model_training import (
     build_final_models,
+    build_model_configs,
     fit_meta_model,
     generate_oof,
     tss_optimal,
@@ -194,36 +195,9 @@ def train_rd2(tour_key: str, tour_info: dict):
                           ("lgbm_dart", dart_params)]:
         joblib.dump(params, MODELS_DIR / f"{tour_key}_R2_{name}_best_params.pkl")
 
-    mf_map = {"sqrt": "sqrt", "log2": "log2", "frac03": 0.3, "frac05": 0.5}
-    rf_p = {k: v for k, v in rf_params.items() if k != "max_features"}
-    rf_p["max_features"] = mf_map.get(rf_params.get("max_features", "sqrt"), "sqrt")
-
-    model_configs = {
-        "logistic": (
-            LogisticRegression,
-            dict(**logistic_params, penalty="elasticnet", solver="saga",
-                 class_weight="balanced", max_iter=2000, random_state=RANDOM_SEED),
-        ),
-        "rf": (
-            RandomForestClassifier,
-            dict(**rf_p, class_weight="balanced", n_jobs=-1, random_state=RANDOM_SEED),
-        ),
-        "lgbm": (
-            lgb.LGBMClassifier,
-            dict(**lgbm_params, class_weight="balanced",
-                 random_state=RANDOM_SEED, verbose=-1),
-        ),
-        "xgb": (
-            xgb.XGBClassifier,
-            dict(**xgb_params, scale_pos_weight=spw, eval_metric="logloss",
-                 use_label_encoder=False, random_state=RANDOM_SEED, verbosity=0),
-        ),
-        "lgbm_dart": (
-            lgb.LGBMClassifier,
-            dict(**dart_params, boosting_type="dart", class_weight="balanced",
-                 random_state=RANDOM_SEED, verbose=-1),
-        ),
-    }
+    model_configs = build_model_configs(
+        logistic_params, rf_params, lgbm_params, xgb_params, dart_params, spw
+    )
 
     print(f"  Generating OOF ({N_CV_SPLITS}-fold × {N_CV_REPEATS} repeats)...")
     oof_matrix = generate_oof(model_configs, model_configs, X, y)
