@@ -21,42 +21,15 @@ import numpy as np
 import pandas as pd
 
 from config import (
-    BASE_MODEL_VARS,
     BETTING_MARKETS,
     MODELS_DIR,
     PREDICTIONS_DIR,
-    RANDOM_SEED,
     SEASON_SUFFIX,
     TOUR_CONFIG,
 )
+from seasonal_model_training import ensemble_predict
 
 warnings.filterwarnings("ignore")
-
-
-# ===== HELPERS =====
-
-def get_market_vars(market_config: dict) -> list:
-    odds_cols = {"Win_odds", "Top5_odds", "Top10_odds", "Top20_odds"}
-    return [v for v in BASE_MODEL_VARS if v not in odds_cols]
-
-
-def ensemble_predict(market_pkg: dict, X: np.ndarray, odds: np.ndarray) -> np.ndarray:
-    """
-    1. Get predictions from each base model.
-    2. Append implied probability (1/odds) as an extra meta-feature.
-    3. Apply meta-model to produce calibrated probabilities.
-    """
-    model_preds = np.column_stack([
-        model.predict_proba(X)[:, 1]
-        for model in market_pkg["models"].values()
-    ])
-    imp_prob = (1.0 / odds.clip(1e-8)).reshape(-1, 1)
-    meta_X = np.hstack([model_preds, imp_prob])
-    meta_X_scaled = market_pkg["meta_scaler"].transform(meta_X)
-    return (
-        market_pkg["meta_model"].predict_proba(meta_X_scaled)[:, 1],
-        model_preds.mean(axis=1),   # raw model score (mean of individual model probs)
-    )
 
 
 # ===== PREDICTION FOR ONE MARKET =====

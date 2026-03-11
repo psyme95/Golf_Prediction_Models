@@ -285,6 +285,39 @@ def fit_meta_model(oof_matrix, y, odds, seed=RANDOM_SEED):
     return meta, scaler
 
 
+# ===== ENSEMBLE PREDICTION =====
+
+def ensemble_predict(market_pkg: dict, X: np.ndarray, odds: np.ndarray = None):
+    """
+    Run base models through the trained meta-model to produce calibrated probabilities.
+
+    Args:
+        market_pkg: trained market package with 'models', 'meta_scaler', 'meta_model'.
+        X:          feature matrix (n_players × n_features).
+        odds:       lay/market odds array (n_players,). When provided, implied probability
+                    (1/odds) is appended to the meta-model input — matching how the
+                    meta-model was trained. Pass None for Rd2 models, which were trained
+                    without the odds feature.
+
+    Returns:
+        (proba, raw_score): calibrated probabilities and mean base-model score.
+    """
+    model_preds = np.column_stack([
+        m.predict_proba(X)[:, 1] for m in market_pkg["models"].values()
+    ])
+    raw_score = model_preds.mean(axis=1)
+
+    if odds is not None:
+        imp_prob = (1.0 / odds.clip(1e-8)).reshape(-1, 1)
+        meta_X   = np.hstack([model_preds, imp_prob])
+    else:
+        meta_X = model_preds
+
+    meta_X_scaled = market_pkg["meta_scaler"].transform(meta_X)
+    proba = market_pkg["meta_model"].predict_proba(meta_X_scaled)[:, 1]
+    return proba, raw_score
+
+
 # ===== MARKET TRAINING FUNCTION =====
 
 def train_market(market_name, market_config, train_df, tour_key, model_vars):
