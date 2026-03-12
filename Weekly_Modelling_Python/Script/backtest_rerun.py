@@ -62,6 +62,10 @@ def load_predictions(path: Path) -> pd.DataFrame:
     for lay_col in LAY_ODDS_COLS.values():
         if lay_col in df.columns:
             df[lay_col] = pd.to_numeric(df[lay_col], errors="coerce")
+    # Normalise event ID column name to match raw data convention used in
+    # walk_forward_backtest.py (apply_back_strategy / compute_reduction_factors)
+    if "EventID" in df.columns and "eventID" not in df.columns:
+        df = df.rename(columns={"EventID": "eventID"})
     print(f"  Rows: {len(df):,}  |  Markets: {sorted(df['Market'].unique())}")
     print(f"  Years: {sorted(df['Test_Year'].unique())}")
     return df
@@ -107,7 +111,7 @@ def aggregate(pred_df: pd.DataFrame, tour_key: str) -> dict:
     # --- Event-level summaries ---
     event_rows = []
     for (t, test_year, event_id, market_name), grp in pred_df.groupby(
-        ["Tour", "Test_Year", "EventID", "Market"]
+        ["Tour", "Test_Year", "eventID", "Market"]
     ):
         if len(grp) == 0:
             continue
@@ -159,7 +163,7 @@ def aggregate(pred_df: pd.DataFrame, tour_key: str) -> dict:
                 "Tour":       tour_key,
                 "Test_Year":  test_year,
                 "Market":     market_name,
-                "N_Events":   int(mdf["EventID"].nunique()),
+                "N_Events":   int(mdf["eventID"].nunique()),
                 "N_Players":  len(mdf),
                 "Prevalence": round(float(y_true.mean()), 4),
                 **disc,
@@ -181,7 +185,7 @@ def aggregate(pred_df: pd.DataFrame, tour_key: str) -> dict:
             "Tour":         tour_key,
             "Market":       market_name,
             "N_Test_Years": int(pred_df[pred_df["Market"] == market_name]["Test_Year"].nunique()),
-            "N_Events":     int(mdf["EventID"].nunique()),
+            "N_Events":     int(mdf["eventID"].nunique()),
             "N_Players":    len(mdf),
             "Prevalence":   round(float(y_true.mean()), 4),
             **disc,
@@ -206,7 +210,7 @@ def export(results: dict, tour_key: str,
            out_path: Path) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    pred_df   = results["all_predictions"]
+    pred_df   = results["all_predictions"].rename(columns={"eventID": "EventID"})
     id_cols   = [c for c in ["Test_Year", "Date", "EventID", "Market",
                               "playerID", "surname", "firstname", "posn", "rating"]
                  if c in pred_df.columns]
