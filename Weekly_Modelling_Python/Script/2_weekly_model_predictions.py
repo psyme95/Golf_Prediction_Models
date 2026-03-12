@@ -44,6 +44,10 @@ def predict_market(market_name: str, market_pkg: dict, newdat: pd.DataFrame) -> 
     if missing:
         print(f"    Warning: missing vars (skipped): {missing}")
 
+    if odds_col not in newdat.columns:
+        print(f"    Warning: odds column '{odds_col}' not found — skipping market")
+        return pd.DataFrame()
+
     df = newdat[available + [odds_col]].copy()
     df = df.dropna()
     X    = df[available].values.astype(float)
@@ -133,6 +137,9 @@ def process_tour(tour_key: str, tour_info: dict):
     for market_name, market_pkg in package["markets"].items():
         print(f"  Processing {market_name}...")
         df = predict_market(market_name, market_pkg, newdat)
+        if df.empty:
+            print(f"    Skipped (no valid predictions)")
+            continue
         market_results[market_name] = df
         print(f"    {len(df)} players  |  "
               f"prob range: {df['Probability'].min():.4f}–{df['Probability'].max():.4f}")
