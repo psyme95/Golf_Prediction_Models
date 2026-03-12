@@ -163,11 +163,13 @@ PLACE_MARKET_CUTS = {
 }
 
 # ===== GRID SEARCH PARAMETERS =====
-# Back grid: floor thresholds — bet if rating >= threshold
-# Lay grid:  ceiling thresholds — bet if rating < threshold
+# Back grid: floor (rating >= threshold) and ceiling (rating < threshold) sweeps.
+# Lay grid:  ceiling (rating < threshold) and floor (rating >= threshold) sweeps.
 # "All" row (no filter) is always included as baseline in both grids.
-GRID_BACK_RATING_FLOORS   = [55, 60, 65, 70]
-GRID_LAY_RATING_CEILINGS  = [55, 60, 65, 70]
+GRID_BACK_RATING_FLOORS    = [55, 60, 65, 70]
+GRID_BACK_RATING_CEILINGS  = [55, 60, 65, 70]
+GRID_LAY_RATING_CEILINGS   = [55, 60, 65, 70]
+GRID_LAY_RATING_FLOORS     = [55, 60, 65, 70]
 
 
 # ===== CLI =====
@@ -867,11 +869,12 @@ def _grid_metrics(band_df: pd.DataFrame, pnl_col: str,
 
 def run_back_grid_search(pred_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Back grid: sweep rating floor thresholds across edge-filtered predictions.
+    Back grid: sweep rating floor and ceiling thresholds across edge-filtered predictions.
 
     Baseline edge condition (model odds < lay odds) always applied first.
-    Floors: bet if rating >= threshold. "All" row = no rating filter.
-    Results sorted by Market then Rating_Floor.
+    Floors:   bet if rating >= threshold. "All" row = no rating filter.
+    Ceilings: bet if rating <  threshold.
+    Results grouped: All → floors → ceilings, sorted by Market within each group.
     """
     df = pred_df.copy()
 
@@ -888,37 +891,57 @@ def run_back_grid_search(pred_df: pd.DataFrame) -> pd.DataFrame:
     act = df["Actual"].to_numpy(dtype=float)
     df["_Back_PnL"] = np.where(act == 1, BACK_STAKE * (rf * lay - 1), -BACK_STAKE)
 
-    thresholds = [("All", None)] + [(f">= {t}", t) for t in GRID_BACK_RATING_FLOORS]
+    floor_thresholds = [("All", None)] + [(f">= {t}", t) for t in GRID_BACK_RATING_FLOORS]
+    ceil_thresholds  = [(f"< {t}", t)  for t in GRID_BACK_RATING_CEILINGS]
 
-    print(f"\n  Back grid search: {len(BETTING_MARKETS)} markets × {len(thresholds)} "
-          f"rating floors (edge-filtered: {len(df):,} bets)...")
+    n_filters = len(floor_thresholds) + len(ceil_thresholds)
+    print(f"\n  Back grid search: {len(BETTING_MARKETS)} markets × {n_filters} "
+          f"rating filters (edge-filtered: {len(df):,} bets)...")
 
     results = []
     for market_name in BETTING_MARKETS:
         mdf = df[df["Market"] == market_name]
         if len(mdf) == 0:
             continue
-        for label, floor in thresholds:
+
+        # Floor sweep (includes "All" baseline)
+        for label, floor in floor_thresholds:
             band_df = mdf[mdf["rating"] >= floor] if floor is not None else mdf
             if len(band_df) == 0:
                 continue
             m = _grid_metrics(band_df, "_Back_PnL", "Actual", "_Lay_Odds", BACK_STAKE)
             results.append({
-                "Market":        market_name,
-                "Rating_Floor":  floor if floor is not None else "All",
+                "Market":          market_name,
+                "Rating_Floor":    floor if floor is not None else "All",
+                "Rating_Ceiling":  "-",
+                **m,
+            })
+
+        # Ceiling sweep
+        for label, ceiling in ceil_thresholds:
+            band_df = mdf[mdf["rating"] < ceiling]
+            if len(band_df) == 0:
+                continue
+            m = _grid_metrics(band_df, "_Back_PnL", "Actual", "_Lay_Odds", BACK_STAKE)
+            results.append({
+                "Market":          market_name,
+                "Rating_Floor":    "-",
+                "Rating_Ceiling":  ceiling,
                 **m,
             })
 
     if not results:
         return pd.DataFrame()
 
-    grid_df = (pd.DataFrame(results)
-               .sort_values(["Market", "Rating_Floor"], na_position="first")
-               .reset_index(drop=True))
+    grid_df = pd.DataFrame(results).reset_index(drop=True)
 
     print(f"  Back grid complete: {len(grid_df)} rows")
     for _, row in grid_df.iterrows():
-        print(f"    {row['Market']:<8}  Rating>={str(row['Rating_Floor']):<6}  "
+        if row["Rating_Ceiling"] == "-":
+            filter_str = f"Floor={str(row['Rating_Floor']):<6}"
+        else:
+            filter_str = f"Ceil <{str(row['Rating_Ceiling']):<6}"
+        print(f"    {row['Market']:<8}  {filter_str}  "
               f"{row['N_Bets']:>5} bets  "
               f"P&L=£{row['Total_PnL']:>8.2f}  ROI={row['ROI_%']:>6.1f}%")
 
@@ -927,13 +950,14 @@ def run_back_grid_search(pred_df: pd.DataFrame) -> pd.DataFrame:
 
 def run_lay_grid_search(pred_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Lay grid: sweep rating ceiling thresholds across edge-filtered predictions.
+    Lay grid: sweep rating ceiling and floor thresholds across edge-filtered predictions.
 
     Baseline edge condition (model odds > lay odds) always applied first.
-    Ceilings: bet if rating < threshold. "All" row = no rating filter.
+    Ceilings: bet if rating <  threshold. "All" row = no rating filter.
+    Floors:   bet if rating >= threshold.
 
     Both fixed-liability and fixed-stake P&L columns are reported.
-    Results sorted by Market then Rating_Ceiling.
+    Results grouped: All → ceilings → floors, sorted by Market within each group.
     """
     df = pred_df.copy()
 
@@ -945,14 +969,15 @@ def run_lay_grid_search(pred_df: pd.DataFrame) -> pd.DataFrame:
     # Baseline: model odds > lay odds
     df = df[df["Normalised_Model_Odds"] > df["_Lay_Odds"]].copy()
 
-    thresholds = [("All", None)] + [(f"< {t}", t) for t in GRID_LAY_RATING_CEILINGS]
+    ceil_thresholds  = [("All", None)] + [(f"< {t}", t)  for t in GRID_LAY_RATING_CEILINGS]
+    floor_thresholds = [(f">= {t}", t) for t in GRID_LAY_RATING_FLOORS]
 
-    print(f"\n  Lay grid search: {len(BETTING_MARKETS)} markets × {len(thresholds)} "
-          f"rating ceilings (edge-filtered: {len(df):,} bets)...")
+    n_filters = len(ceil_thresholds) + len(floor_thresholds)
+    print(f"\n  Lay grid search: {len(BETTING_MARKETS)} markets × {n_filters} "
+          f"rating filters (edge-filtered: {len(df):,} bets)...")
 
     results = []
     for market_name, market_config in BETTING_MARKETS.items():
-        target_col = market_config["target_col"]
         mdf = df[df["Market"] == market_name]
         if len(mdf) == 0:
             continue
@@ -960,49 +985,61 @@ def run_lay_grid_search(pred_df: pd.DataFrame) -> pd.DataFrame:
         fl = LAY_FIXED_LIABILITY[market_name]
         fs = LAY_FIXED_STAKE[market_name]
 
-        for label, ceiling in thresholds:
+        def _append_lay_row(band_df, ceiling_val, floor_val, _fl=fl, _fs=fs):
+            m_fl = _grid_metrics(band_df, "Lay_PnL_FixedLiab",
+                                 "Actual", "_Lay_Odds", _fl)
+            m_fs = _grid_metrics(band_df, "Lay_PnL_FixedStake",
+                                 "Actual", "_Lay_Odds", _fs)
+            results.append({
+                "Market":          market_name,
+                "Rating_Ceiling":  ceiling_val,
+                "Rating_Floor":    floor_val,
+                "N_Bets":          m_fl["N_Bets"],
+                "N_Lost":          m_fl["N_Won"],    # N_Won = player placed = layer lost
+                "Strike_Rate_%":   round((m_fl["N_Bets"] - m_fl["N_Won"]) / m_fl["N_Bets"] * 100, 2),
+                "Avg_Lay_Odds":    m_fl["Avg_Lay_Odds"],
+                # Fixed liability
+                "FL_Liability":    _fl,
+                "FL_Total_PnL":    m_fl["Total_PnL"],
+                "FL_ROI_%":        m_fl["ROI_%"],
+                "FL_Sharpe":       m_fl["Sharpe"],
+                "FL_Max_Drawdown": m_fl["Max_Drawdown"],
+                # Fixed stake
+                "FS_Stake":        _fs,
+                "FS_Total_PnL":    m_fs["Total_PnL"],
+                "FS_ROI_%":        m_fs["ROI_%"],
+                "FS_Sharpe":       m_fs["Sharpe"],
+                "FS_Max_Drawdown": m_fs["Max_Drawdown"],
+            })
+
+        # Ceiling sweep (includes "All" baseline)
+        for label, ceiling in ceil_thresholds:
             band_df = mdf[mdf["rating"] < ceiling] if ceiling is not None else mdf
             if len(band_df) == 0:
                 continue
+            _append_lay_row(band_df,
+                            ceiling_val=ceiling if ceiling is not None else "All",
+                            floor_val="-")
 
-            # Fixed liability metrics — ROI denominator = n_bets × liability
-            m_fl = _grid_metrics(band_df, "Lay_PnL_FixedLiab",
-                                 "Actual", "_Lay_Odds", fl)
-            # Fixed stake metrics — ROI denominator = n_bets × stake
-            m_fs = _grid_metrics(band_df, "Lay_PnL_FixedStake",
-                                 "Actual", "_Lay_Odds", fs)
-
-            results.append({
-                "Market":                  market_name,
-                "Rating_Ceiling":          ceiling if ceiling is not None else "All",
-                "N_Bets":                  m_fl["N_Bets"],
-                "N_Lost":                  m_fl["N_Won"],    # N_Won = player placed = layer lost
-                "Strike_Rate_%":           round((m_fl["N_Bets"] - m_fl["N_Won"]) / m_fl["N_Bets"] * 100, 2),
-                "Avg_Lay_Odds":            m_fl["Avg_Lay_Odds"],
-                # Fixed liability
-                "FL_Liability":            fl,
-                "FL_Total_PnL":            m_fl["Total_PnL"],
-                "FL_ROI_%":                m_fl["ROI_%"],
-                "FL_Sharpe":               m_fl["Sharpe"],
-                "FL_Max_Drawdown":         m_fl["Max_Drawdown"],
-                # Fixed stake
-                "FS_Stake":                fs,
-                "FS_Total_PnL":            m_fs["Total_PnL"],
-                "FS_ROI_%":                m_fs["ROI_%"],
-                "FS_Sharpe":               m_fs["Sharpe"],
-                "FS_Max_Drawdown":         m_fs["Max_Drawdown"],
-            })
+        # Floor sweep
+        for label, floor in floor_thresholds:
+            band_df = mdf[mdf["rating"] >= floor]
+            if len(band_df) == 0:
+                continue
+            _append_lay_row(band_df, ceiling_val="-", floor_val=floor)
 
     if not results:
         return pd.DataFrame()
 
-    grid_df = (pd.DataFrame(results)
-               .sort_values(["Market", "Rating_Ceiling"], na_position="first")
-               .reset_index(drop=True))
+    grid_df = pd.DataFrame(results).reset_index(drop=True)
 
     print(f"  Lay grid complete: {len(grid_df)} rows")
     for _, row in grid_df.iterrows():
-        print(f"    {row['Market']:<8}  Rating<{str(row['Rating_Ceiling']):<6}  "
+        if row["Rating_Floor"] == "-":
+            filter_str = f"Ceil <{str(row['Rating_Ceiling']):<6}"
+        else:
+            filter_str = f"Floor={str(row['Rating_Floor']):<6}"
+        print(f"    {row['Market']:<8}  {filter_str}  "
               f"{row['N_Bets']:>5} bets  "
               f"FL P&L=£{row['FL_Total_PnL']:>8.2f}  "
               f"FS P&L=£{row['FS_Total_PnL']:>8.2f}")
@@ -1070,6 +1107,7 @@ def _write_grid_sheet(wb, grid_df: pd.DataFrame, sheet_name: str,
         "FL_Sharpe": 10, "FL_Max_Drawdown": 16,
         "FS_Stake": 10, "FS_Total_PnL": 14, "FS_ROI_%": 10,
         "FS_Sharpe": 10, "FS_Max_Drawdown": 16,
+        # Lay grid gains Rating_Floor; Back grid gains Rating_Ceiling — both covered above
     }
     for col_idx, col_name in enumerate(cols, 1):
         ws.column_dimensions[get_column_letter(col_idx)].width = col_widths.get(col_name, default_w)
