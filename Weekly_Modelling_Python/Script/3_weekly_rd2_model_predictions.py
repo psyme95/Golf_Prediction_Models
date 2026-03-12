@@ -9,8 +9,9 @@ and outputs calibrated probabilities normalised within the current field.
 Input:
   {SHARED_INPUT_DIR}/This_Week_Rd2_{TOUR}.csv
     Expected columns: Surname, Firstname,
-                      Normalised_Probability, Model_Score  ← from Script 2 output
-                      Rd2Pos, Rd2Lead, AvPosn, Top5, Betfair_rd2
+                      Normalised_Probability, Model_Score  ← from Script 2 Winner output
+                      Rd2Pos, Rd2Lead, AvPosn, Top5       ← in-tournament data
+                      Betfair_rd2                          ← quality filter only (not a model feature)
 
 Output columns match R output for direct comparison:
   Surname, Firstname, GLM_Odds_Probability_Median, Model_Score_Median,
@@ -85,10 +86,9 @@ def predict_rd2(df: pd.DataFrame, model_pkg: dict) -> pd.DataFrame:
     if "Betfair_rd2" not in df.columns:
         raise ValueError("Missing 'Betfair_rd2' column for calibration")
 
-    X    = df[available].values.astype(float)
-    odds = df["Betfair_rd2"].values.astype(float)
+    X = df[available].values.astype(float)
 
-    # Rd2 models were trained without implied probability — pass odds=None
+    # Rd2 models were trained without implied probability — odds excluded from all model layers
     calibrated_prob, raw_score = ensemble_predict(model_pkg, X)
 
     # Tournament-level normalisation (win market: probabilities sum to 1)

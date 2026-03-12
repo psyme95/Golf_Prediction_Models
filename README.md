@@ -42,7 +42,7 @@ Golf_Prediction_Models/
 
 | Script | What it does |
 |--------|--------------|
-| `seasonal_model_training.py` | Trains one ensemble per market (Winner / Top5 / Top10 / Top20). Optuna-tunes five base models, generates OOF predictions via RepeatedStratifiedKFold, then fits a LogisticRegression meta-model that incorporates implied market odds as a calibration signal. Saves `.pkl` packages to `Output/Models/`. |
+| `seasonal_model_training.py` | Trains one ensemble per market (Winner / Top5 / Top10 / Top20). Optuna-tunes five base models, generates OOF predictions via RepeatedStratifiedKFold, then fits a LogisticRegression meta-model on OOF predictions only (odds excluded from all model layers). Saves `.pkl` packages to `Output/Models/`. |
 | `seasonal_rd2_model_training.py` | Same approach for the Rd2 model, trained on Round 2 in-tournament features (position, lead, average position, pre-tournament model score). Meta-model is trained on base model OOF scores only — no implied odds. |
 
 ### Backtesting
@@ -68,7 +68,7 @@ All models use `class_weight="balanced"` / `scale_pos_weight` to handle the stro
 Base models use pure player-skill and course-fit signals only — odds are deliberately excluded from all base model feature sets. Strokes Gained categories, historical finishing rates, course/location history, and field-context metrics are the primary signals. See `config.py → BASE_MODEL_VARS` for the full list.
 
 ### Meta-model
-A `LogisticRegression` is trained on the OOF predictions from the five base models. For standard markets it also receives implied probability (1/odds) as an additional input, combining player-skill scores with market consensus in a single calibration step. Rd2 models omit the odds feature.
+A `LogisticRegression` is trained on the OOF predictions from the five base models only. Market odds are excluded from the meta-model — empirical testing showed worse outcomes when implied probability was included as a meta-feature. The meta-model performs ensemble weighting and probability calibration purely from the base model OOF scores.
 
 ### Hyperparameter tuning
 Optuna tunes each base model independently per market per season. Best parameters are saved as `.pkl` files and used as warm-starts the following season to reduce tuning time.

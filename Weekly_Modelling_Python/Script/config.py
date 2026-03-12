@@ -143,7 +143,7 @@ TOUR_CONFIG = {
     "PGA": {
         "name": "PGA Tour",
         "historical_file": INPUT_DIR / "PGA_Processed.xlsx",
-        "profit_file": INPUT_DIR / "PGA.xlsx",           # Raw file: source of Profit columns
+        "profit_file": SHARED_INPUT_DIR / "PGA.xlsx",    # Raw file: source of Lay/Profit columns
         "weekly_file": INPUT_DIR / "This_Week_PGA_Processed.xlsx",
         "rd2_predictions_file": SHARED_INPUT_DIR / "Full_PGA_Historical_Predictions.xlsx",
         "rd2_raw_file": SHARED_INPUT_DIR / "PGA.xlsx",
@@ -152,7 +152,7 @@ TOUR_CONFIG = {
     "Euro": {
         "name": "European Tour",
         "historical_file": INPUT_DIR / "Euro_Processed.xlsx",
-        "profit_file": INPUT_DIR / "Euro.xlsx",          # Raw file: source of Profit columns
+        "profit_file": SHARED_INPUT_DIR / "Euro.xlsx",   # Raw file: source of Lay/Profit columns
         "weekly_file": INPUT_DIR / "This_Week_Euro_Processed.xlsx",
         "rd2_predictions_file": SHARED_INPUT_DIR / "Full_Euro_Historical_Predictions.xlsx",
         "rd2_raw_file": SHARED_INPUT_DIR / "Euro.xlsx",
