@@ -304,8 +304,7 @@ def apply_back_strategy(df: pd.DataFrame, lay_odds_col: str,
     cut = PLACE_MARKET_CUTS.get(market_name)
     if cut is not None and "posn" in df.columns:
         # Compute RF per event so ties are evaluated within each field
-        event_id_col = "eventID" if "eventID" in df.columns else "EventID"
-        for event_id, idx in df.groupby(event_id_col).groups.items():
+        for event_id, idx in df.groupby("eventID").groups.items():
             event_slice = df.loc[idx]
             event_rf    = compute_reduction_factors(event_slice, cut)
             rf[df.index.get_indexer(idx)] = event_rf.values
@@ -388,8 +387,7 @@ def _build_dh_arrays(df: pd.DataFrame, market_name: str):
 
     posn = pd.to_numeric(df["posn"], errors="coerce")
 
-    event_id_col = "eventID" if "eventID" in df.columns else "EventID"
-    for _, idx in df.groupby(event_id_col).groups.items():
+    for _, idx in df.groupby("eventID").groups.items():
         ep   = posn.loc[idx]
         qual = ep[ep <= cut]
         if len(qual) == 0:
