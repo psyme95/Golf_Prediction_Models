@@ -309,13 +309,19 @@ def build_model_configs(logistic_params, rf_params, lgbm_params,
 
 # ===== META-MODEL (calibration + weighting) =====
 
-def fit_meta_model(oof_matrix, y, seed=RANDOM_SEED):
+def fit_meta_model(oof_matrix, y, implied_odds=None, seed=RANDOM_SEED):
     """
-    LogisticRegression on OOF predictions from base models only.
-    Market odds are excluded from the meta-model to avoid data leakage
-    and because empirical testing showed worse outcomes when included.
+    LogisticRegression on OOF predictions from base models.
+
+    implied_odds: optional 1-D array of implied probabilities (1 / decimal_odds)
+        for the current market. When provided, appended as an extra column so
+        the meta-learner can blend model scores with market consensus. Only used
+        for tours where use_meta_odds=True (currently Euro only).
     """
-    meta_X = oof_matrix
+    if implied_odds is not None:
+        meta_X = np.column_stack([oof_matrix, implied_odds])
+    else:
+        meta_X = oof_matrix
     scaler = StandardScaler()
     meta_X_scaled = scaler.fit_transform(meta_X)
     meta = LogisticRegression(C=1.0, max_iter=2000, random_state=seed)
@@ -325,13 +331,16 @@ def fit_meta_model(oof_matrix, y, seed=RANDOM_SEED):
 
 # ===== ENSEMBLE PREDICTION =====
 
-def ensemble_predict(market_pkg: dict, X: np.ndarray):
+def ensemble_predict(market_pkg: dict, X: np.ndarray, odds_values=None):
     """
     Run base models through the trained meta-model to produce calibrated probabilities.
 
     Args:
-        market_pkg: trained market package with 'models', 'meta_scaler', 'meta_model'.
-        X:          feature matrix (n_players × n_features).
+        market_pkg:  trained market package with 'models', 'meta_scaler', 'meta_model'.
+        X:           feature matrix (n_players × n_features).
+        odds_values: optional 1-D array of decimal market odds (n_players,). Required
+                     when market_pkg['meta_uses_odds'] is True — converted to implied
+                     probability and appended to the meta-feature matrix.
 
     Returns:
         (proba, raw_score): calibrated probabilities and mean base-model score.
@@ -341,14 +350,21 @@ def ensemble_predict(market_pkg: dict, X: np.ndarray):
     ])
     raw_score = model_preds.mean(axis=1)
 
-    meta_X_scaled = market_pkg["meta_scaler"].transform(model_preds)
+    if market_pkg.get("meta_uses_odds") and odds_values is not None:
+        implied = 1.0 / np.clip(odds_values, 1e-8, None)
+        meta_input = np.column_stack([model_preds, implied])
+    else:
+        meta_input = model_preds
+
+    meta_X_scaled = market_pkg["meta_scaler"].transform(meta_input)
     proba = market_pkg["meta_model"].predict_proba(meta_X_scaled)[:, 1]
     return proba, raw_score
 
 
 # ===== MARKET TRAINING FUNCTION =====
 
-def train_market(market_name, market_config, train_df, tour_key, model_vars):
+def train_market(market_name, market_config, train_df, tour_key, model_vars,
+                 use_meta_odds=False):
     print(f"\n  --- {market_name} ---")
 
     target_col = market_config["target_col"]
@@ -360,7 +376,13 @@ def train_market(market_name, market_config, train_df, tour_key, model_vars):
     if missing:
         print(f"    Warning: missing vars (skipped): {missing}")
 
-    df = train_df[available_vars + [target_col]].dropna()
+    # Include odds_col in the dropna subset when used in the meta-model so that
+    # rows with missing odds are excluded from training consistently.
+    subset_cols = available_vars + [target_col]
+    if use_meta_odds:
+        subset_cols = subset_cols + [odds_col]
+
+    df = train_df[subset_cols].dropna()
     X   = df[available_vars].values.astype(float)
     y   = df[target_col].values.astype(int)
 
@@ -419,7 +441,8 @@ def train_market(market_name, market_config, train_df, tour_key, model_vars):
         print(f"      {name:12s}  log_loss={ll:.4f}  AUC={auc:.4f}  AP={ap:.4f}  TSS={tss:.4f}")
 
     # --- Meta-model (calibration) ---
-    meta_model, meta_scaler = fit_meta_model(oof_matrix, y)
+    implied_odds = (1.0 / df[odds_col].values) if use_meta_odds else None
+    meta_model, meta_scaler = fit_meta_model(oof_matrix, y, implied_odds=implied_odds)
 
     # --- Final models on full data ---
     print("    Fitting final models on full training data...")
@@ -430,6 +453,7 @@ def train_market(market_name, market_config, train_df, tour_key, model_vars):
         "model_names": model_names,
         "meta_model": meta_model,
         "meta_scaler": meta_scaler,
+        "meta_uses_odds": use_meta_odds,
         "model_vars": available_vars,
         "odds_col": odds_col,
         "market_size": market_config["market_size"],
@@ -455,9 +479,9 @@ def get_training_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_market_vars(market_config: dict) -> list:
-    """Base vars only — market odds are excluded from all model layers
-    (base models and meta-model). Empirical testing showed worse outcomes
-    when implied probability was included as a model feature."""
+    """Base model vars only — odds are never used as base model features.
+    Whether implied odds enter the meta-learner is controlled separately
+    via use_meta_odds in TOUR_CONFIG."""
     odds_cols = {"Win_odds", "Top5_odds", "Top10_odds", "Top20_odds"}
     return [v for v in BASE_MODEL_VARS if v not in odds_cols]
 
@@ -507,10 +531,12 @@ def process_tour(tour_key: str, tour_info: dict):
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     all_market_results = {}
+    use_meta_odds = tour_info.get("use_meta_odds", False)
 
     for market_name, market_config in BETTING_MARKETS.items():
         model_vars = get_market_vars(market_config)
-        result = train_market(market_name, market_config, train_df, tour_key, model_vars)
+        result = train_market(market_name, market_config, train_df, tour_key, model_vars,
+                              use_meta_odds=use_meta_odds)
         all_market_results[market_name] = result
 
     # Save model package

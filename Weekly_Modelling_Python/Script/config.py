@@ -47,9 +47,9 @@ N_CV_REPEATS = 5     # repeats  → 25 OOF fits per model per market
 
 # ===== BETTING MARKETS =====
 # odds_col: used for EV/edge calculations and result sorting at prediction time.
-# Odds are NOT used in the meta-model calibration layer — testing showed worse
-# outcomes when implied probability was included as a meta-feature.
 # Odds are NOT used as base model features — base models use pure player-skill metrics.
+# Whether implied odds are included as a meta-learner feature is controlled per-tour
+# via use_meta_odds in TOUR_CONFIG below.
 BETTING_MARKETS = {
     "Winner": {
         "target_col": "win",
@@ -148,6 +148,7 @@ TOUR_CONFIG = {
         "rd2_predictions_file": SHARED_INPUT_DIR / "Full_PGA_Historical_Predictions.xlsx",
         "rd2_raw_file": SHARED_INPUT_DIR / "PGA.xlsx",
         "rd2_weekly_file": SHARED_INPUT_DIR / "This_Week_Rd2_PGA.csv",
+        "use_meta_odds": False,  # Implied market odds not used in meta-learner for PGA
     },
     "Euro": {
         "name": "European Tour",
@@ -157,6 +158,7 @@ TOUR_CONFIG = {
         "rd2_predictions_file": SHARED_INPUT_DIR / "Full_Euro_Historical_Predictions.xlsx",
         "rd2_raw_file": SHARED_INPUT_DIR / "Euro.xlsx",
         "rd2_weekly_file": SHARED_INPUT_DIR / "This_Week_Rd2_Euro.csv",
+        "use_meta_odds": True,   # Implied market odds included as meta-learner feature for Euro
     },
 }
 
