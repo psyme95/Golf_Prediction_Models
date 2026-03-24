@@ -28,7 +28,7 @@ except NameError:
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 BASE_DIR = SCRIPT_DIR.parent                                        # Weekly_Modelling_Python/
-SHARED_INPUT_DIR = BASE_DIR.parent / "Weekly_Modelling" / "Input"  # Raw data shared with R
+SHARED_INPUT_DIR = BASE_DIR.parent / "Weekly_Modelling_Python" / "Input"
 INPUT_DIR = BASE_DIR / "Input"                                      # Python-processed data
 MODELS_DIR = BASE_DIR / "Output" / "Models"
 PREDICTIONS_DIR = BASE_DIR / "Output" / "Predictions"
