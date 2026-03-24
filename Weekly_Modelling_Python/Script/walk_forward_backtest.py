@@ -166,10 +166,10 @@ PLACE_MARKET_CUTS = {
 # Back grid: floor (rating >= threshold) and ceiling (rating < threshold) sweeps.
 # Lay grid:  ceiling (rating < threshold) and floor (rating >= threshold) sweeps.
 # "All" row (no filter) is always included as baseline in both grids.
-GRID_BACK_RATING_FLOORS    = [55, 60, 65, 70]
-GRID_BACK_RATING_CEILINGS  = [55, 60, 65, 70]
-GRID_LAY_RATING_CEILINGS   = [55, 60, 65, 70]
-GRID_LAY_RATING_FLOORS     = [55, 60, 65, 70]
+GRID_BACK_RATING_FLOORS    = [55, 60, 65, 70, 75]
+GRID_BACK_RATING_CEILINGS  = [55, 60, 65, 70, 75]
+GRID_LAY_RATING_CEILINGS   = [55, 60, 65, 70, 75]
+GRID_LAY_RATING_FLOORS     = [55, 60, 65, 70, 75]
 
 
 # ===== CLI =====
@@ -214,8 +214,11 @@ def predict_event(event_df: pd.DataFrame, market_name: str,
 
     X    = df[available].values.astype(float)
 
-    proba, raw_score = smt.ensemble_predict(market_pkg, X)
+    odds_values = None
+    if market_pkg.get("meta_uses_odds"):
+        odds_values = df[odds_col].values.astype(float)
 
+    proba, raw_score = smt.ensemble_predict(market_pkg, X, odds_values=odds_values)
     market_size = market_pkg["market_size"]
     prob_sum    = proba.sum()
     norm_prob   = (proba / prob_sum) * market_size if prob_sum > 0 else proba
