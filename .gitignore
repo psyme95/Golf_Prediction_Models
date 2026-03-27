@@ -67,3 +67,5 @@ Weekly_Modelling/Output/
 Weekly_Modelling_Python/Input/
 Weekly_Modelling_Python/Output/
 __pycache__/
+Weekly_Modelling_Python/Script/Output/WalkForward/Logs/Euro_run.log
+Weekly_Modelling_Python/Script/Output/WalkForward/Logs/PGA_run.log
