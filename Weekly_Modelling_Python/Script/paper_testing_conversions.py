@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 
-DATE = "05-05-2026" # dd-mm-yyyy format, change to run calculations for a different file
+DATE = "19-05-2026" # dd-mm-yyyy format, change to run calculations for a different file
 
 # --- Config ---
 TOURS = {
