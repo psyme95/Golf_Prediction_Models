@@ -11,6 +11,7 @@ import golfmodel.modeling as modeling
 from golfmodel.backtest import (
     aggregate_results,
     apply_strategies,
+    back_summary,
     backtest_events,
     dead_heat_info,
     export_results,
@@ -84,18 +85,40 @@ event = pd.DataFrame({
 })
 out = apply_strategies(event.copy(), event, "Winner", "Lay_odds", "win")
 
-# Player 0 backs at 4.0 and wins: winnings taxed at 3%
+# Per-row P&L is GROSS — commission is a per-market charge, applied on netting
 assert bool(out.loc[0, "Back_Bet"])
-assert np.isclose(out.loc[0, "Back_PnL"], BACK_STAKE * 3.0 * (1 - COMMISSION))
-# Player 2 backs at 50 and loses: full stake lost, no commission on losses
+assert np.isclose(out.loc[0, "Back_PnL"], BACK_STAKE * 3.0)
+# Player 2 backs at 50 and loses: full stake lost
 assert bool(out.loc[2, "Back_Bet"]) and np.isclose(out.loc[2, "Back_PnL"], -BACK_STAKE)
-# Player 1 layed at 6.0, did not win: layer wins stake (=1000/5) net of commission
+# Player 1 layed at 6.0, did not win: layer wins stake (=1000/5), gross
 assert bool(out.loc[1, "Lay_Bet"])
-assert np.isclose(out.loc[1, "Lay_PnL_FixedLiab"], (1000.0 / 5.0) * (1 - COMMISSION))
+assert np.isclose(out.loc[1, "Lay_PnL_FixedLiab"], 1000.0 / 5.0)
 # Edge ratios
 assert np.allclose(out["Edge_Raw"], [0.5 * 4, 0.1 * 6, 0.02 * 50])
 assert np.allclose(out["Edge_Norm"], [4 / 2.0, 6 / 10.0, 50 / 40.0])
-print("commission + edge columns: OK")
+print("gross P&L + edge columns: OK")
+
+
+# ===== market-level commission netting =====
+# Betfair charges commission on NET market winnings, not per bet.
+# 3 bets in one market: +5, +5, -5 → net 5 → 3% → 4.85  (not 4.70)
+one_market = pd.DataFrame({
+    "EventID": [1, 1, 1], "Back_Bet": [True] * 3,
+    "Back_PnL": [5.0, 5.0, -5.0], "Back_PnL_Kelly": [0.0] * 3,
+    "Back_Kelly_Stake": [0.0] * 3, "win": [1, 1, 0],
+})
+assert np.isclose(back_summary(one_market, "win")["Back_PnL"], 4.85), \
+    back_summary(one_market, "win")
+
+# A market that nets negative pays no commission at all
+losing_market = one_market.copy()
+losing_market["Back_PnL"] = [5.0, -5.0, -5.0]
+assert np.isclose(back_summary(losing_market, "win")["Back_PnL"], -5.0)
+
+# Two separate markets are charged independently (+5 net → 4.85; -5 → -5)
+two_markets = pd.concat([one_market, losing_market.assign(EventID=2)], ignore_index=True)
+assert np.isclose(back_summary(two_markets, "win")["Back_PnL"], 4.85 - 5.0)
+print("per-market commission netting: OK")
 
 # Kelly back stake: p=0.5, odds 4.0 → b=3*0.97, f*=(p*b-q)/b
 b = 3.0 * (1 - COMMISSION)
@@ -103,7 +126,7 @@ f_star = (0.5 * b - 0.5) / b
 expected_stake = min(KELLY_BANKROLL * KELLY_FRACTION * f_star,
                      KELLY_BANKROLL * KELLY_MAX_RISK)
 assert np.isclose(_kelly_back_stake(np.array([0.5]), np.array([4.0]))[0], expected_stake)
-assert np.isclose(out.loc[0, "Back_PnL_Kelly"], expected_stake * 3.0 * (1 - COMMISSION))
+assert np.isclose(out.loc[0, "Back_PnL_Kelly"], expected_stake * 3.0)
 # Negative-edge Kelly → zero stake
 assert _kelly_back_stake(np.array([0.1]), np.array([2.0]))[0] == 0.0
 # Kelly lay liability: p=0.1, odds 6.0 → b'=(1-c)/5, f*=((1-p)b'-p)/b'
@@ -111,7 +134,7 @@ b2 = (1 - COMMISSION) / 5.0
 f2 = (0.9 * b2 - 0.1) / b2
 expected_liab = min(KELLY_BANKROLL * KELLY_FRACTION * f2, KELLY_BANKROLL * KELLY_MAX_RISK)
 assert np.isclose(_kelly_lay_liability(np.array([0.1]), np.array([6.0]))[0], expected_liab)
-assert np.isclose(out.loc[1, "Lay_PnL_Kelly"], (expected_liab / 5.0) * (1 - COMMISSION))
+assert np.isclose(out.loc[1, "Lay_PnL_Kelly"], expected_liab / 5.0)
 print("kelly staking: OK")
 
 

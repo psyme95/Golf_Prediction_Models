@@ -151,9 +151,25 @@ def _lay_return(lay, actual, exp_winners, act_winners, liability):
     return np.where(actual == 1, win_return, stake)
 
 
-def _net(pnl: np.ndarray) -> np.ndarray:
-    """Betfair commission: winning bets pay COMMISSION on the winnings."""
-    return np.where(pnl > 0, pnl * (1 - COMMISSION), pnl)
+def net_of_commission(event_pnl):
+    """Betfair commission applies to NET winnings per market, not per bet.
+
+    A market here is one (event × market-type) — e.g. the Top20 market for a
+    single tournament. Losing bets offset winning ones first; commission is
+    charged only if the market nets positive. Per-bet charging would overstate
+    commission whenever a strategy places several bets in the same market.
+    """
+    return np.where(event_pnl > 0, event_pnl * (1 - COMMISSION), event_pnl)
+
+
+def _net_event_total(df: pd.DataFrame, pnl_col: str) -> float:
+    """Total P&L after per-market commission. Assumes df is a single market
+    type; groups by event so each Betfair market is netted before charging."""
+    if "EventID" in df.columns:
+        event_pnl = df.groupby("EventID")[pnl_col].sum()
+    else:
+        event_pnl = pd.Series([df[pnl_col].sum()])
+    return float(net_of_commission(event_pnl).sum())
 
 
 def _kelly_back_stake(p: np.ndarray, lay: np.ndarray) -> np.ndarray:
@@ -187,9 +203,11 @@ def apply_strategies(preds: pd.DataFrame, event_full: pd.DataFrame,
     continuity; per-row potential P&L columns (prefix "_") let the strategy
     grids re-select bets under any basis/threshold/filter without recomputing.
 
-    All winning P&L components are net of COMMISSION. Kelly stakes always use
-    the raw probability — Kelly sizing needs a real probability, and the
-    normalised column is not one.
+    Per-row P&L columns are GROSS. Betfair commission is charged on net
+    winnings per market, so it is applied at aggregation time (see
+    net_of_commission) rather than per bet. Kelly stakes always use the raw
+    probability — Kelly sizing needs a real probability, and the normalised
+    column is not one.
     """
     df     = preds.copy()
     lay    = df[lay_odds_col].to_numpy(dtype=float)
@@ -202,18 +220,18 @@ def apply_strategies(preds: pd.DataFrame, event_full: pd.DataFrame,
     df["Edge_Raw"]    = p * lay
     df["Edge_Norm"]   = lay / np.clip(model, 1e-8, None)
 
-    # --- Potential P&L (as if every row were bet) ---
-    back_pot = _net(np.where(actual == 1, BACK_STAKE * (rf * lay - 1), -BACK_STAKE))
+    # --- Potential P&L, gross of commission (as if every row were bet) ---
+    back_pot = np.where(actual == 1, BACK_STAKE * (rf * lay - 1), -BACK_STAKE)
 
     fl       = np.full(len(df), LAY_FIXED_LIABILITY[market_name])
     fs_liab  = LAY_FIXED_STAKE[market_name] * np.clip(lay - 1, 1e-8, None)
-    lay_fl_pot = _net(_lay_return(lay, actual, exp_w, act_w, fl))
-    lay_fs_pot = _net(_lay_return(lay, actual, exp_w, act_w, fs_liab))
+    lay_fl_pot = _lay_return(lay, actual, exp_w, act_w, fl)
+    lay_fs_pot = _lay_return(lay, actual, exp_w, act_w, fs_liab)
 
     kb_stake = _kelly_back_stake(p, lay)
     kl_liab  = _kelly_lay_liability(p, lay)
-    back_kelly_pot = _net(np.where(actual == 1, kb_stake * (rf * lay - 1), -kb_stake))
-    lay_kelly_pot  = _net(_lay_return(lay, actual, exp_w, act_w, kl_liab))
+    back_kelly_pot = np.where(actual == 1, kb_stake * (rf * lay - 1), -kb_stake)
+    lay_kelly_pot  = _lay_return(lay, actual, exp_w, act_w, kl_liab)
 
     df["_Back_PnL_Pot"]       = back_pot
     df["_Back_Kelly_PnL_Pot"] = back_kelly_pot
@@ -249,8 +267,8 @@ def back_summary(df: pd.DataFrame, target_col: str) -> dict:
         return {"Back_NBets": 0, "Back_NWon": 0, "Back_HitRate": np.nan,
                 "Back_PnL": 0.0, "Back_ROI": np.nan,
                 "Back_PnL_Kelly": 0.0, "Back_ROI_Kelly": np.nan}
-    pnl       = float(bets["Back_PnL"].sum())
-    pnl_k     = float(bets["Back_PnL_Kelly"].sum())
+    pnl       = _net_event_total(bets, "Back_PnL")
+    pnl_k     = _net_event_total(bets, "Back_PnL_Kelly")
     staked_k  = float(bets["Back_Kelly_Stake"].sum())
     return {
         "Back_NBets":     len(bets),
@@ -273,9 +291,9 @@ def lay_summary(df: pd.DataFrame, target_col: str, market_name: str) -> dict:
                 "Lay_PnL_Kelly": 0.0, "Lay_ROI_Kelly": np.nan}
     n_bets  = len(bets)
     n_lost  = int(bets[target_col].sum())          # player placed → layer lost
-    pnl_fl  = float(bets["Lay_PnL_FixedLiab"].sum())
-    pnl_fs  = float(bets["Lay_PnL_FixedStake"].sum())
-    pnl_k   = float(bets["Lay_PnL_Kelly"].sum())
+    pnl_fl  = _net_event_total(bets, "Lay_PnL_FixedLiab")
+    pnl_fs  = _net_event_total(bets, "Lay_PnL_FixedStake")
+    pnl_k   = _net_event_total(bets, "Lay_PnL_Kelly")
     liab_fl = n_bets * LAY_FIXED_LIABILITY[market_name]
     liab_fs = float(bets["Lay_Liability_FixedStake"].sum())
     liab_k  = float(bets["Lay_Kelly_Liability"].sum())
@@ -353,6 +371,10 @@ def backtest_events(package: dict, test_df: pd.DataFrame, tour_key: str,
             preds["Actual"] = preds[target_col].astype(int)
             preds = apply_strategies(preds, event_full, market_name,
                                      lay_odds_col, target_col)
+            # Set identifiers before summarising: commission netting groups by
+            # EventID, and the summary helpers are shared with the aggregate path.
+            preds["Tour"], preds["Test_Year"] = tour_key, test_year
+            preds["EventID"], preds["Date"], preds["Market"] = event_id, event_date, market_name
 
             event_summaries.append({
                 "Tour": tour_key, "Test_Year": test_year, "EventID": event_id,
@@ -362,8 +384,6 @@ def backtest_events(package: dict, test_df: pd.DataFrame, tour_key: str,
                 **lay_summary(preds, target_col, market_name),
             })
 
-            preds["Tour"], preds["Test_Year"] = tour_key, test_year
-            preds["EventID"], preds["Date"], preds["Market"] = event_id, event_date, market_name
             all_preds.append(preds)
 
     return all_preds, event_summaries
@@ -425,17 +445,23 @@ def aggregate_results(all_preds: list, event_summaries: list, tour_key: str) -> 
 
 def _grid_metrics(band_df: pd.DataFrame, pnl_col: str, total_staked: float,
                   kelly_pnl_col: str, kelly_denom_col: str) -> dict:
-    pnl_vals  = band_df[pnl_col].to_numpy(dtype=float)
-    total_pnl = pnl_vals.sum()
-    event_pnl = band_df.groupby("EventID")[pnl_col].sum()
+    # Commission is charged per market, so net each event's P&L before
+    # totalling. Event-level nets also drive Sharpe, drawdown and consistency.
+    event_pnl = pd.Series(
+        net_of_commission(band_df.groupby("EventID")[pnl_col].sum()),
+        index=band_df.groupby("EventID")[pnl_col].sum().index,
+    )
+    total_pnl = event_pnl.sum()
     epnl_std  = event_pnl.std()
     cum       = event_pnl.cumsum().values
 
-    year_pnl   = band_df.groupby("Test_Year")[pnl_col].sum()
+    year_of_event = band_df.groupby("EventID")["Test_Year"].first()
+    year_pnl   = event_pnl.groupby(year_of_event).sum()
     years_pos  = f"{int((year_pnl > 0).sum())}/{len(year_pnl)}"
     worst_year = float(year_pnl.min())
 
-    kelly_pnl   = float(band_df[kelly_pnl_col].sum())
+    kelly_pnl   = float(net_of_commission(
+        band_df.groupby("EventID")[kelly_pnl_col].sum()).sum())
     kelly_denom = float(band_df[kelly_denom_col].sum())
 
     return {
