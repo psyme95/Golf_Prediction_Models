@@ -69,3 +69,10 @@ Weekly_Modelling_Python/Output/
 __pycache__/
 Weekly_Modelling_Python/Script/Output/WalkForward/Logs/Euro_run.log
 Weekly_Modelling_Python/Script/Output/WalkForward/Logs/PGA_run.log
+
+# golfmodel pipeline: data, models, predictions, backtests, logs
+pipeline/Input/
+pipeline/Output/
+
+# IDE metadata
+.idea/
