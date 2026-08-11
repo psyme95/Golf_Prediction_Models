@@ -415,7 +415,13 @@ def predict_weekly(tour_key: str) -> Path | None:
     PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = PREDICTIONS_DIR / f"{tour_key}_Predictions_{datetime.now():%d-%m-%Y}.xlsx"
 
-    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+    try:
+        writer_cm = pd.ExcelWriter(out_path, engine="openpyxl")
+    except PermissionError:
+        print(f"  ERROR: {out_path.name} is open in Excel — close it and rerun.")
+        return None
+
+    with writer_cm as writer:
         for market_name, pkg in package.items():
             model_vars = [v for v in pkg["model_vars"] if v in newdat.columns]
             odds_col   = pkg["odds_col"]
