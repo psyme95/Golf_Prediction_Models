@@ -59,10 +59,15 @@ Dropped: the Rd2 in-tournament layer and all R-pipeline compatibility shims.
 
 - **Commission**: 3% (`COMMISSION`) deducted from every winning P&L component,
   in all summaries and grids.
-- **Lay trigger in weekly predictions**: every market sheet has `Max_Lay_Odds`
-  (= `LAY_EDGE_TRIGGER / Probability`) — lay on Betfair while the available lay
-  odds are at or below this value; above it the edge is gone. The policy from
-  the walk-forward evidence applies this to Top10/Top20 only.
+- **Lay trigger in weekly predictions**: `Normalised_Model_Odds` is the trigger
+  — lay on Betfair while the available lay odds sit below it, skipping anything
+  priced over 50. Applies to Top20 (core) and optionally Top10.
+  *Record of a dropped alternative:* a `Max_Lay_Odds` column
+  (`0.87 / Probability`, a raw-probability edge threshold) was trialled and
+  removed on 2026-08-11. Filtering that way raises ROI per bet but cuts bets
+  per event from ~80 to ~8, destroying within-event diversification and
+  dropping Sharpe from ~0.50 to ~0.24. Recompute from `Probability` if ever
+  needed; nothing else depended on it.
 - **Edge bases**: every prediction row carries `Edge_Raw`
   (`Probability × lay odds`) and `Edge_Norm` (`lay odds / Normalised_Model_Odds`).
   Headline bets remain the normalised zero-margin basis pending grid evidence;

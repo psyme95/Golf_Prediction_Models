@@ -64,10 +64,11 @@ GRID_RATING_THRESHOLDS = [55, 60, 65, 70, 75]   # floor and ceiling sweeps
 # Minimum-edge sweep: model probability must exceed threshold × implied probability.
 EDGE_THRESHOLDS = [1.00, 1.05, 1.10, 1.15, 1.20, 1.30]
 
-# Lay trigger for weekly predictions: lay while available lay odds <= this
-# threshold / model probability. 0.87 chosen from walk-forward grid evidence
-# (raw-edge sweep, consistent 4-5/5 years across both tours on place markets).
-LAY_EDGE_TRIGGER = 0.87
+# Lay trigger: the current policy is normalised-basis zero-margin, so the
+# trigger is simply Normalised_Model_Odds in the prediction sheets — lay while
+# available lay odds sit below it. A raw-probability edge threshold was trialled
+# (Max_Lay_Odds = 0.87 / Probability) and dropped: filtering that way improves
+# ROI per bet but cuts within-event diversification and lowers Sharpe.
 
 # Per-market lay-odds bands (floor and ceiling sweeps). Winner lay odds run
 # into the hundreds (up to ~1000); place markets are much shorter.

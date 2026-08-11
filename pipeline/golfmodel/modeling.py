@@ -27,7 +27,6 @@ import xgboost as xgb
 
 from .config import (
     BASE_MODEL_VARS,
-    LAY_EDGE_TRIGGER,
     MARKETS,
     MODELS_DIR,
     N_CV_REPEATS,
@@ -449,10 +448,8 @@ def predict_weekly(tour_key: str) -> Path | None:
                 "Model_Score":            np.round(raw_score, 5),
                 "Probability":            np.round(proba, 6),
                 "Normalised_Probability": np.round(norm_prob, 6),
+                # Lay trigger: lay while the available lay odds are below this.
                 "Normalised_Model_Odds":  np.round(1.0 / np.clip(norm_prob, 1e-8, None), 2),
-                # Betfair trigger: lay while available lay odds <= this value;
-                # above it the price has drifted inside the model's edge margin.
-                "Max_Lay_Odds":           np.round(LAY_EDGE_TRIGGER / np.clip(proba, 1e-8, None), 2),
             }).sort_values("Market_Odds")
             out.to_excel(writer, sheet_name=f"{market_name}_Market", index=False)
             print(f"  {market_name}: {len(out)} players | "
