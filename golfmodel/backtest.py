@@ -1,23 +1,14 @@
-"""Shared backtest core + static (current-season) and walk-forward drivers.
+"""Backtesting: prediction, bet settlement, summaries and strategy grids.
 
-Fixes baked in relative to the old pipeline:
-  - Dead-heat counts come from the FULL event field (every row of the event,
-    before any feature filtering), not from the filtered prediction rows.
-  - Discrimination/calibration metrics use raw Probability only; the
-    normalised probability (sums to market_size per event) is for ranking
-    and bet selection, never for calibration metrics.
-  - Lay ROI = P&L / total liability everywhere (summaries and grids).
-  - use_meta_odds flows from TOURS config into walk-forward training, so the
-    backtest evaluates the same architecture as production.
-
-Profit-improvement layer:
-  - 3% commission (COMMISSION) deducted from every winning P&L component.
-  - Dual edge basis per row (raw calibrated probability vs field-normalised)
-    with strategy grids sweeping edge thresholds, odds bands, and rating
-    filters on both bases, including year-by-year consistency columns.
-  - Conservative fractional-Kelly staking computed alongside fixed staking.
-  - Headline bet flags remain the normalised zero-margin basis until the
-    grid evidence supports switching (policy decision is human-led).
+- Dead heats are settled from the full event field, not just the rows that
+  had complete features.
+- Discrimination and calibration metrics use the raw probability. The
+  normalised probability (summing to the market size in each event) is used
+  only for ranking and bet selection.
+- Commission is charged on net P&L per Betfair market, and lay ROI is P&L
+  divided by total liability.
+- The strategy grids sweep edge thresholds, odds bands and rating filters one
+  at a time, with year-by-year consistency columns to judge them on.
 """
 
 import shutil
@@ -466,7 +457,7 @@ def aggregate_results(all_preds: list, event_summaries: list, tour_key: str) -> 
 # Each grid row is one candidate strategy: market × edge basis × one filter
 # applied on top of that basis's zero-margin baseline. P&L is recomputed from
 # the per-row potential columns, so bets differ between bases and filters.
-# Year-by-year consistency columns support the (human-led) policy decision.
+# Year-by-year consistency columns show whether a result holds across seasons.
 
 def _grid_metrics(band_df: pd.DataFrame, pnl_col: str, total_staked: float,
                   kelly_pnl_col: str, kelly_denom_col: str,

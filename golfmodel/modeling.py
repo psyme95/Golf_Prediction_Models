@@ -222,9 +222,8 @@ def tune(model_key: str, X, y, groups, n_trials: int,
          warm_params: dict = None, seed: int = RANDOM_SEED, w=None) -> dict:
     """Optuna search minimising grouped-CV log-loss.
 
-    Log-loss targets probability calibration directly, betting P&L depends on
-    being right about the probability at the price, not on ranking (which is
-    what the previous average-precision objective optimised).
+    Log-loss is used rather than a ranking metric because betting P&L depends
+    on the probability being right at the price, not just on the ordering.
 
     Scored by a manual fold loop rather than cross_val_score, because sklearn's
     "neg_log_loss" string scorer has no hook for per-row sample weights, which
