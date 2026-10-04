@@ -117,7 +117,8 @@ def _suggest_params(trial, model_key: str, n_pos: int) -> dict:
             "learning_rate":    trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "subsample":        trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "min_child_weight": trial.suggest_int("min_child_weight", 5, 50),
+            # A hessian sum, so on the scale of p(1-p) per row for rare positives.
+            "min_child_weight": trial.suggest_float("min_child_weight", 0.01, 10.0, log=True),
             "reg_alpha":        trial.suggest_float("reg_alpha", 1e-4, 1.0, log=True),
             "reg_lambda":       trial.suggest_float("reg_lambda", 1e-4, 1.0, log=True),
         }
@@ -177,35 +178,34 @@ def expand_fractional(X, frac, groups):
     return X2[keep], y2[keep], w2[keep], groups2[keep]
 
 
-def make_model(model_key: str, params: dict, spw: float, seed: int = RANDOM_SEED,
-               weighted: bool = False):
-    """Instantiate a model from tuned params plus fixed per-family kwargs."""
+def make_model(model_key: str, params: dict, seed: int = RANDOM_SEED):
+    """Instantiate a model from tuned params plus fixed per-family kwargs.
+
+    No class weighting: the models are tuned on log-loss and recalibrated by the
+    meta-model, and re-weighting the classes would only distort the base
+    probabilities that both of those depend on.
+    """
     p = dict(params)
-    # class_weight / scale_pos_weight MULTIPLY with sample_weight, which would
-    # double-count the dead-heat weighting, so they are dropped when weights
-    # carry the class balance themselves.
-    cw  = None if weighted else "balanced"
-    spw = 1.0 if weighted else spw
     if model_key == "logistic":
         # saga converges poorly on unscaled features (rating ~70, field ~150).
         return make_pipeline(
             StandardScaler(),
-            LogisticRegression(solver="saga", class_weight=cw, max_iter=5000,
+            LogisticRegression(solver="saga", max_iter=5000,
                                random_state=seed, **p))
     if model_key == "rf":
         p["max_features"] = _RF_MAX_FEATURES.get(p.get("max_features", "sqrt"), "sqrt")
-        return RandomForestClassifier(class_weight=cw, n_jobs=-1,
+        return RandomForestClassifier(n_jobs=-1,
                                       random_state=seed, **p)
     # LightGBM ignores subsample unless subsample_freq > 0.
     if model_key == "lgbm":
-        return lgb.LGBMClassifier(class_weight=cw, subsample_freq=1,
+        return lgb.LGBMClassifier(subsample_freq=1,
                                   random_state=seed, verbose=-1, **p)
     if model_key == "xgb":
-        return xgb.XGBClassifier(scale_pos_weight=spw, eval_metric="logloss",
+        return xgb.XGBClassifier(eval_metric="logloss",
                                  random_state=seed, verbosity=0, **p)
     if model_key == "lgbm_dart":
-        return lgb.LGBMClassifier(boosting_type="dart", class_weight=cw,
-                                  subsample_freq=1, random_state=seed,
+        return lgb.LGBMClassifier(boosting_type="dart", subsample_freq=1,
+                                  random_state=seed,
                                   verbose=-1, **p)
     raise ValueError(f"Unknown model key: {model_key}")
 
@@ -219,9 +219,8 @@ def fit_model(model, X, y, w=None):
 
 # ===== TUNING =====
 
-def tune(model_key: str, X, y, groups, n_trials: int, spw: float,
-         warm_params: dict = None, seed: int = RANDOM_SEED, w=None,
-         weighted: bool = False) -> dict:
+def tune(model_key: str, X, y, groups, n_trials: int,
+         warm_params: dict = None, seed: int = RANDOM_SEED, w=None) -> dict:
     """Optuna search minimising grouped-CV log-loss.
 
     Log-loss targets probability calibration directly, betting P&L depends on
@@ -231,15 +230,12 @@ def tune(model_key: str, X, y, groups, n_trials: int, spw: float,
     Scored by a manual fold loop rather than cross_val_score, because sklearn's
     "neg_log_loss" string scorer has no hook for per-row sample weights, which
     dead-heat labels require on both the fit and the score."""
-    # `weighted` means the weights carry the class balance (dead-heat labels), so
-    # class_weight="balanced" must be dropped or it double-counts. A price tilt
-    # alone does not carry class balance, so it leaves class_weight in place.
     w = np.ones(len(y), dtype=float) if w is None else np.asarray(w, dtype=float)
     n_pos = int(round(float(w[y == 1].sum())))
     cv_splits = grouped_cv_splits(X, y, groups, n_repeats=1, seed=seed)
 
     def fold_loss(params, tr, va):
-        model = make_model(model_key, params, spw, seed, weighted=weighted)
+        model = make_model(model_key, params, seed)
         fit_model(model, X[tr], y[tr], w[tr])
         p = np.clip(model.predict_proba(X[va])[:, 1], 1e-15, 1 - 1e-15)
         return log_loss(y[va], p, sample_weight=w[va], labels=[0, 1])
@@ -263,8 +259,8 @@ def tune(model_key: str, X, y, groups, n_trials: int, spw: float,
 
 # ===== OOF + META =====
 
-def generate_oof(model_params: dict, X, y, groups, spw: float,
-                 seed: int = RANDOM_SEED, w=None, weighted: bool = False):
+def generate_oof(model_params: dict, X, y, groups,
+                 seed: int = RANDOM_SEED, w=None):
     """Out-of-fold predictions for all models over repeated grouped CV.
     Returns (oof_matrix, covered_mask); rows never validated are masked out."""
     splits = grouped_cv_splits(X, y, groups, n_repeats=N_CV_REPEATS, seed=seed)
@@ -274,7 +270,7 @@ def generate_oof(model_params: dict, X, y, groups, spw: float,
 
     for tr, va in splits:
         for j, (name, params) in enumerate(model_params.items()):
-            model = make_model(name, params, spw, seed, weighted=weighted)
+            model = make_model(name, params, seed)
             fit_model(model, X[tr], y[tr], None if w is None else w[tr])
             oof_sum[va, j] += model.predict_proba(X[va])[:, 1]
         oof_count[va] += 1
@@ -416,11 +412,9 @@ def train_market(market_name: str, train_df: pd.DataFrame, tour_key: str,
         w  = pw if w is None else w * pw
 
     n_pos = float(w[y == 1].sum()) if use_frac else int(y.sum())
-    n_neg = (float(w[y == 0].sum()) if use_frac else len(y) - n_pos)
     if n_pos == 0:
         print(f"    {market_name}: no positives, skipped")
         return None
-    spw = n_neg / n_pos
     dup_note = f" | +{n_dup} dead-heat rows" if n_dup else ""
     print(f"    {market_name}: {n_rows:,} rows | {n_pos:.1f} positives "
           f"({100 * n_pos / n_rows:.1f}%) | {df['eventID'].nunique()} events"
@@ -430,16 +424,14 @@ def train_market(market_name: str, train_df: pd.DataFrame, tour_key: str,
     for name in MODEL_NAMES:
         warm_path = models_dir / f"{tour_key}_{market_name}_{name}_best_params.pkl"
         warm = joblib.load(warm_path) if warm_path.exists() else None
-        model_params[name] = tune(name, X, y, groups, n_trials, spw, warm, seed,
-                                  w=w, weighted=use_frac)
+        model_params[name] = tune(name, X, y, groups, n_trials, warm, seed, w=w)
 
     models_dir.mkdir(parents=True, exist_ok=True)
     for name, params in model_params.items():
         joblib.dump(params, models_dir / f"{tour_key}_{market_name}_{name}_best_params.pkl")
 
     print(f"    Generating OOF ({N_CV_SPLITS}-fold x {N_CV_REPEATS} grouped repeats)...")
-    oof, covered = generate_oof(model_params, X, y, groups, spw, seed, w=w,
-                                weighted=use_frac)
+    oof, covered = generate_oof(model_params, X, y, groups, seed, w=w)
     y_cov = y[covered]
     w_cov = w[covered] if w is not None else None
     if (~covered).sum():
@@ -470,7 +462,7 @@ def train_market(market_name: str, train_df: pd.DataFrame, tour_key: str,
 
     final_models = {}
     for name, params in model_params.items():
-        model = make_model(name, params, spw, seed, weighted=use_frac)
+        model = make_model(name, params, seed)
         fit_model(model, X, y, w)
         final_models[name] = model
 

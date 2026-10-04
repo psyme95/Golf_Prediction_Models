@@ -228,6 +228,8 @@ for e in range(N_EVENTS):
     skill = rng.normal(0, 1, FIELD)
     posn = (-skill + rng.normal(0, 1.2, FIELD)).argsort().argsort() + 1
     year = 2023 + (e >= 30)                     # 30 train events, 10 test events
+    # Noisy market so the model and the market disagree both ways.
+    odds = np.clip(20 - 10 * skill + rng.normal(0, 6, FIELD), 1.5, 500)
     for p in range(FIELD):
         rows.append({
             "eventID": e, "playerID": p,
@@ -237,8 +239,8 @@ for e in range(N_EVENTS):
             "rating": 60 + 5 * skill[p] + rng.normal(0, 1),
             "current": skill[p] + rng.normal(0, 0.5),
             "field": rng.normal(0, 1),
-            "Win_odds": float(np.clip(20 - 10 * skill[p], 1.5, 500)),
-            "Lay_odds": float(np.clip(21 - 10 * skill[p], 1.5, 500)),
+            "Win_odds": float(odds[p]),
+            "Lay_odds": float(odds[p] + 1),
         })
 df = add_targets(pd.DataFrame(rows))
 
