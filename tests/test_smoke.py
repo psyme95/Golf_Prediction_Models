@@ -257,8 +257,7 @@ pkg = modeling.train_market("Winner", train_df, "TEST", use_meta_odds=True,
                             n_trials=2, models_dir=tmp)
 assert pkg is not None and len(pkg["models"]) == 5
 assert 0 < pkg["metrics"]["lgbm"]["roc_auc"] <= 1
-# Residual meta: market coefficient learned and finite, logit form recorded
-assert pkg["meta_odds_form"] == "logit"
+# Residual meta: market coefficient learned and finite
 assert np.isfinite(pkg["meta_market_coef"])
 
 preds, summaries = backtest_events({"Winner": pkg}, test_df, "TEST", 2024)

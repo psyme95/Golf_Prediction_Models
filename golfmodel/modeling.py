@@ -1,12 +1,10 @@
 """Model training: grouped CV, Optuna tuning, OOF stacking, meta-calibration.
 
 All cross-validation is grouped by eventID (StratifiedGroupKFold) so rows from
-the same tournament never appear in both train and validation folds, the
-single fix for the leakage that inflated the old pipeline's OOF metrics.
+the same tournament never appear in both train and validation folds.
 
-Bundle schema is kept compatible with the old pipeline's joblib bundles:
-per-market dict with keys models / meta_model / meta_scaler / meta_uses_odds /
-model_vars / odds_col / market_size, wrapped in {"markets": {...}}.
+A bundle is {"markets": {market_name: market_pkg}}, where each market_pkg holds
+the fitted base models, the meta-model and the metadata needed to predict.
 """
 
 from datetime import datetime
@@ -280,21 +278,36 @@ def generate_oof(model_params: dict, X, y, groups,
     return oof, covered
 
 
+def logit(p: np.ndarray) -> np.ndarray:
+    p = np.clip(p, 1e-6, 1 - 1e-6)
+    return np.log(p / (1 - p))
+
+
 def market_logit(odds_values: np.ndarray) -> np.ndarray:
-    """Implied log-odds from decimal odds, the residual-modelling market anchor.
-    The meta-learner sees logit(1/odds) so its coefficient measures how much
-    the ensemble leans on market consensus vs deviates from it."""
-    implied = np.clip(1.0 / np.clip(odds_values, 1.0 + 1e-6, None), 1e-6, 1 - 1e-6)
-    return np.log(implied / (1 - implied))
+    """Implied log-odds from decimal odds, used as the market anchor in the
+    meta-model. Its coefficient shows how far the ensemble leans on the market."""
+    return logit(1.0 / np.clip(odds_values, 1.0 + 1e-6, None))
 
 
-def fit_meta_model(oof_matrix, y, market_feature=None, seed: int = RANDOM_SEED, w=None):
-    """LogisticRegression on OOF base-model scores (+ optional market log-odds)."""
-    meta_X = oof_matrix if market_feature is None else np.column_stack([oof_matrix, market_feature])
-    scaler = StandardScaler()
+def meta_features(model_preds: np.ndarray, odds_values=None) -> np.ndarray:
+    """Meta-model inputs: base-model log-odds, plus market log-odds if used.
+
+    Inputs are not standardised. A base model whose out-of-fold predictions are
+    near constant would otherwise be divided by a tiny standard deviation, and
+    the full-data refit of that model can vary enough at prediction time to
+    push the meta-model to 0 or 1.
+    """
+    X = logit(model_preds)
+    if odds_values is not None:
+        X = np.column_stack([X, market_logit(np.asarray(odds_values, dtype=float))])
+    return X
+
+
+def fit_meta_model(oof_matrix, y, odds_values=None, seed: int = RANDOM_SEED, w=None):
+    """Logistic regression on base-model log-odds (+ optional market log-odds)."""
     meta = LogisticRegression(C=1.0, max_iter=2000, random_state=seed)
-    meta.fit(scaler.fit_transform(meta_X), y, sample_weight=w)
-    return meta, scaler
+    meta.fit(meta_features(oof_matrix, odds_values), y, sample_weight=w)
+    return meta
 
 
 def market_share(odds: pd.Series, kept: pd.Series) -> float:
@@ -317,30 +330,17 @@ def normalise(proba: np.ndarray, market_size: float, share: float = 1.0) -> np.n
 
 
 def ensemble_predict(market_pkg: dict, X: np.ndarray, odds_values=None):
-    """Base models → meta-model → calibrated probability.
-
-    Bundle compat: old bundles (no 'meta_odds_form' key) trained on raw implied
-    probability; new bundles ('meta_odds_form' == 'logit') on market log-odds.
-    The feature fed at predict time must match what the meta was trained on."""
+    """Base models -> meta-model -> calibrated probability."""
     model_preds = np.column_stack([
         m.predict_proba(X)[:, 1] for m in market_pkg["models"].values()
     ])
     raw_score = model_preds.mean(axis=1)
 
-    if market_pkg.get("meta_uses_odds"):
-        if odds_values is None:
-            raise ValueError("Market meta-model requires odds_values")
-        if market_pkg.get("meta_odds_form") == "logit":
-            market_feat = market_logit(np.asarray(odds_values, dtype=float))
-        else:
-            market_feat = 1.0 / np.clip(odds_values, 1e-8, None)
-        meta_input = np.column_stack([model_preds, market_feat])
-    else:
-        meta_input = model_preds
-
-    proba = market_pkg["meta_model"].predict_proba(
-        market_pkg["meta_scaler"].transform(meta_input)
-    )[:, 1]
+    if market_pkg["meta_uses_odds"] and odds_values is None:
+        raise ValueError("Market meta-model requires odds_values")
+    meta_X = meta_features(model_preds,
+                           odds_values if market_pkg["meta_uses_odds"] else None)
+    proba = market_pkg["meta_model"].predict_proba(meta_X)[:, 1]
     return proba, raw_score
 
 
@@ -452,13 +452,13 @@ def train_market(market_name: str, train_df: pd.DataFrame, tour_key: str,
 
     if use_meta_odds:
         odds_for_meta = odds_expanded if use_frac else df[odds_col].values.astype(float)
-        market_feat = market_logit(odds_for_meta[covered])
+        meta_odds = odds_for_meta[covered]
     else:
-        market_feat = None
-    meta_model, meta_scaler = fit_meta_model(oof, y_cov, market_feat, seed, w=w_cov)
+        meta_odds = None
+    meta_model = fit_meta_model(oof, y_cov, meta_odds, seed, w=w_cov)
     meta_market_coef = float(meta_model.coef_[0, -1]) if use_meta_odds else None
     if use_meta_odds:
-        print(f"    Meta market coefficient (scaled): {meta_market_coef:.3f}")
+        print(f"    Meta market coefficient (log-odds): {meta_market_coef:.3f}")
 
     final_models = {}
     for name, params in model_params.items():
@@ -470,9 +470,7 @@ def train_market(market_name: str, train_df: pd.DataFrame, tour_key: str,
         "models":         final_models,
         "model_names":    list(model_params),
         "meta_model":     meta_model,
-        "meta_scaler":    meta_scaler,
         "meta_uses_odds": use_meta_odds,
-        "meta_odds_form": "logit" if use_meta_odds else None,
         "meta_market_coef": meta_market_coef,
         "model_vars":     available_vars,
         "odds_col":       odds_col,
