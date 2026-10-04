@@ -35,6 +35,7 @@ from .config import (
     N_CV_REPEATS,
     N_CV_SPLITS,
     OPTUNA_TRIALS,
+    PREDICTIONS_DIR,
     RANDOM_SEED,
     SEASON_SUFFIX,
     TOURS,
@@ -247,10 +248,7 @@ def tune(model_key: str, X, y, groups, n_trials: int,
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
     if warm_params:
-        try:
-            study.enqueue_trial(warm_params)
-        except Exception:
-            pass
+        study.enqueue_trial(warm_params)
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     return study.best_params
 
@@ -554,7 +552,6 @@ def predict_weekly(tour_key: str) -> Path | None:
     newdat  = pd.read_excel(weekly_path)
     print(f"\n=== PREDICTING: {cfg['name']} ({len(newdat)} players) ===")
 
-    from .config import PREDICTIONS_DIR
     PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = PREDICTIONS_DIR / f"{tour_key}_Predictions_{datetime.now():%d-%m-%Y}.xlsx"
 
@@ -605,12 +602,5 @@ def predict_weekly(tour_key: str) -> Path | None:
 
 
 def load_bundle(path: Path) -> dict:
-    """Load a bundle and normalise to {market_name: market_pkg}.
-    Accepts both wrapped ({'markets': {...}}) and flat formats."""
-    bundle = joblib.load(path)
-    if "markets" in bundle and isinstance(bundle["markets"], dict):
-        bundle = bundle["markets"]
-    known = {k: v for k, v in bundle.items() if k in MARKETS}
-    if not known:
-        raise ValueError(f"No recognised markets in bundle {path.name}: {list(bundle)}")
-    return known
+    """Load a production bundle as {market_name: market_pkg}."""
+    return joblib.load(path)["markets"]

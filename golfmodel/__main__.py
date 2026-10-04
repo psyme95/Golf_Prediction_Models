@@ -1,12 +1,14 @@
 """Golf prediction pipeline CLI.
 
-  python -m golfmodel preprocess  [--tour PGA|Euro]
-  python -m golfmodel train       [--tour ...] [--trials N]
-  python -m golfmodel predict     [--tour ...]
-  python -m golfmodel season      [--tour ...] [--year Y] [--no-grid]
-  python -m golfmodel walkforward [--tour ...] [--trials N] [--start-year Y]
-                                  [--min-test-year Y] [--force-retrain] [--parallel]
+  python -m golfmodel preprocess  [--kind historical|weekly]
+  python -m golfmodel train       [--trials N]
+  python -m golfmodel predict
+  python -m golfmodel season      [--year Y] [--no-grid]
+  python -m golfmodel walkforward [--trials N] [--model ensemble|bayes] [--tag NAME] ...
   python -m golfmodel paper       --date dd-mm-yyyy
+
+All commands except paper take --tour PGA|Euro (default: both).
+Run `python -m golfmodel <command> -h` for the full options.
 """
 
 import argparse
@@ -22,7 +24,6 @@ from .config import LOGS_DIR, OPTUNA_TRIALS, PAPER_DIR, RANDOM_SEED, TOURS
 # LightGBM with recent scikit-learn warns about feature names on every predict,
 # even though both fit and predict use plain arrays.
 warnings.filterwarnings("ignore", message="X does not have valid feature names")
-
 
 # Consoles on legacy code pages (cp1252) can't encode characters like '→';
 # degrade them to '?' instead of crashing with UnicodeEncodeError.
@@ -156,7 +157,8 @@ def cmd_paper(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="golfmodel", description=__doc__)
+    parser = argparse.ArgumentParser(prog="golfmodel", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add(name, fn, **extra_args):
