@@ -54,3 +54,12 @@ r_legacy/Output/
 r_legacy/PGA/
 r_legacy/PGA_R2/
 r_legacy/Euro_R2/
+
+# Python
+__pycache__/
+.venv/
+.pytest_cache/
+
+# Data, models and outputs (Python)
+/Input/
+/Output/
