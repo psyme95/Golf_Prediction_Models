@@ -58,7 +58,8 @@ from .config import (
 )
 from .data import join_lay_odds, load_processed_historical
 from .excel_out import write_workbook
-from .modeling import ensemble_predict, load_bundle, train_market, tss_optimal
+from .modeling import (ensemble_predict, load_bundle, market_share, normalise,
+                       train_market, tss_optimal)
 
 WF_MODELS_DIR = BACKTESTS_DIR / "WalkForward_Models"
 MIN_POSITIVES = 10   # skip a market window when training positives are fewer
@@ -123,7 +124,9 @@ def predict_event(event_full: pd.DataFrame, market_pkg: dict) -> pd.DataFrame | 
     df = event_full.copy()
     for col in model_vars + [odds_col]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=model_vars + [odds_col])
+    kept  = df[model_vars + [odds_col]].notna().all(axis=1)
+    share = market_share(df[odds_col], kept)
+    df = df[kept]
     if df.empty:
         return None
 
@@ -131,9 +134,7 @@ def predict_event(event_full: pd.DataFrame, market_pkg: dict) -> pd.DataFrame | 
     odds_values = df[odds_col].values.astype(float) if market_pkg.get("meta_uses_odds") else None
     proba, raw_score = ensemble_predict(market_pkg, X, odds_values=odds_values)
 
-    market_size = market_pkg["market_size"]
-    prob_sum    = proba.sum()
-    norm_prob   = (proba / prob_sum) * market_size if prob_sum > 0 else proba
+    norm_prob = normalise(proba, market_pkg["market_size"], share)
 
     result = df.copy()
     result["Model_Score"]            = raw_score.round(5)

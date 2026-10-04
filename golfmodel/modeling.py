@@ -289,6 +289,25 @@ def fit_meta_model(oof_matrix, y, market_feature=None, seed: int = RANDOM_SEED, 
     return meta, scaler
 
 
+def market_share(odds: pd.Series, kept: pd.Series) -> float:
+    """Share of an event's market-implied probability held by the kept rows.
+
+    Players dropped for missing features are still in the event and still hold
+    their share of the market, so the remaining players should be normalised to
+    market_size * share rather than the full market_size.
+    """
+    odds = pd.to_numeric(odds, errors="coerce")
+    implied = 1.0 / odds.where(odds > 1.0)
+    total = implied.sum()
+    return float(implied[kept].sum() / total) if total > 0 else 1.0
+
+
+def normalise(proba: np.ndarray, market_size: float, share: float = 1.0) -> np.ndarray:
+    """Rescale probabilities to sum to market_size * share within an event."""
+    total = proba.sum()
+    return proba / total * market_size * share if total > 0 else proba
+
+
 def ensemble_predict(market_pkg: dict, X: np.ndarray, odds_values=None):
     """Base models → meta-model → calibrated probability.
 
@@ -551,7 +570,9 @@ def predict_weekly(tour_key: str) -> Path | None:
                 print(f"  {market_name}: odds column '{odds_col}' missing, skipped")
                 continue
 
-            df = newdat.dropna(subset=model_vars + [odds_col])
+            kept = newdat[model_vars + [odds_col]].notna().all(axis=1)
+            share = market_share(newdat[odds_col], kept)
+            df = newdat[kept]
             if df.empty:
                 print(f"  {market_name}: no complete rows, skipped")
                 continue
@@ -560,8 +581,7 @@ def predict_weekly(tour_key: str) -> Path | None:
             odds_values = df[odds_col].values.astype(float) if pkg.get("meta_uses_odds") else None
             proba, raw_score = ensemble_predict(pkg, X, odds_values=odds_values)
 
-            prob_sum  = proba.sum()
-            norm_prob = (proba / prob_sum) * pkg["market_size"] if prob_sum > 0 else proba
+            norm_prob = normalise(proba, pkg["market_size"], share)
 
             out = pd.DataFrame({
                 "Surname":                df.get("surname", df.get("Surname")),

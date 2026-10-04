@@ -146,6 +146,20 @@ assert np.isclose(out.loc[1, "Lay_PnL_Kelly"], expected_liab / 5.0)
 print("kelly staking: OK")
 
 
+# ===== normalisation when players are dropped =====
+from golfmodel.modeling import market_share, normalise
+
+# Implied 0.5/0.25/0.25 plus one unpriced player. The third player is dropped
+# for missing features, so the other two hold 75% of the market between them.
+_odds = pd.Series([2.0, 4.0, 4.0, np.nan])
+_kept = pd.Series([True, True, False, False])
+_share = market_share(_odds, _kept)
+assert abs(_share - 0.75) < 1e-12
+assert abs(normalise(np.array([0.4, 0.2]), 1, _share).sum() - 0.75) < 1e-12
+assert abs(normalise(np.array([0.4, 0.2]), 1).sum() - 1.0) < 1e-12
+print("normalisation with dropped players: OK")
+
+
 # ===== dead-heat labels: weighted duplication == fractional cross-entropy =====
 # This is the assertion the entire label change rests on. All five base models
 # are classifiers that reject a continuous target; representing a fractional

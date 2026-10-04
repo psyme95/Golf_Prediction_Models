@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 
 from .config import BASE_MODEL_VARS, CROSS_MARKET_VARS, MARKETS, RANDOM_SEED
+from .modeling import normalise
 
 # Markets in ascending cut order. Winner is cut 1; for the place markets the
 # cut equals market_size.
@@ -249,6 +250,7 @@ def predict_event_bayes(event_full: pd.DataFrame, market_name: str, pkg: dict,
                                       columns=list(MARKET_CUTS))
 
     proba = cache["probs"][market_name]
+    total = proba.sum()
 
     # Match predict_event: a row without a market price cannot be bet on.
     keep = proba.notna() & df[odds_col].notna()
@@ -257,9 +259,10 @@ def predict_event_bayes(event_full: pd.DataFrame, market_name: str, pkg: dict,
     result = df[keep].copy()
     proba = proba[keep].to_numpy(dtype=float)
 
-    prob_sum = proba.sum()
-    market_size = market["market_size"]
-    norm_prob = (proba / prob_sum) * market_size if prob_sum > 0 else proba
+    # Unpriced players were simulated too, so the priced ones are normalised to
+    # their own share of the field rather than the whole market.
+    share = proba.sum() / total if total > 0 else 1.0
+    norm_prob = normalise(proba, market["market_size"], share)
 
     result["Model_Score"] = proba.round(5)
     result["Probability"] = proba.round(6)
