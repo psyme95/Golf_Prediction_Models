@@ -193,15 +193,17 @@ def make_model(model_key: str, params: dict, spw: float, seed: int = RANDOM_SEED
         p["max_features"] = _RF_MAX_FEATURES.get(p.get("max_features", "sqrt"), "sqrt")
         return RandomForestClassifier(class_weight=cw, n_jobs=-1,
                                       random_state=seed, **p)
+    # LightGBM ignores subsample unless subsample_freq > 0.
     if model_key == "lgbm":
-        return lgb.LGBMClassifier(class_weight=cw, random_state=seed,
-                                  verbose=-1, **p)
+        return lgb.LGBMClassifier(class_weight=cw, subsample_freq=1,
+                                  random_state=seed, verbose=-1, **p)
     if model_key == "xgb":
         return xgb.XGBClassifier(scale_pos_weight=spw, eval_metric="logloss",
                                  random_state=seed, verbosity=0, **p)
     if model_key == "lgbm_dart":
         return lgb.LGBMClassifier(boosting_type="dart", class_weight=cw,
-                                  random_state=seed, verbose=-1, **p)
+                                  subsample_freq=1, random_state=seed,
+                                  verbose=-1, **p)
     raise ValueError(f"Unknown model key: {model_key}")
 
 
