@@ -19,7 +19,10 @@ import pandas as pd
 
 from .config import LOGS_DIR, OPTUNA_TRIALS, PAPER_DIR, RANDOM_SEED, TOURS
 
-warnings.filterwarnings("ignore")
+# LightGBM with recent scikit-learn warns about feature names on every predict,
+# even though both fit and predict use plain arrays.
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
+
 
 # Consoles on legacy code pages (cp1252) can't encode characters like '→';
 # degrade them to '?' instead of crashing with UnicodeEncodeError.

@@ -21,6 +21,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, log_loss, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 import lightgbm as lgb
@@ -186,9 +187,11 @@ def make_model(model_key: str, params: dict, spw: float, seed: int = RANDOM_SEED
     cw  = None if weighted else "balanced"
     spw = 1.0 if weighted else spw
     if model_key == "logistic":
-        return LogisticRegression(penalty="elasticnet", solver="saga",
-                                  class_weight=cw, max_iter=2000,
-                                  random_state=seed, **p)
+        # saga converges poorly on unscaled features (rating ~70, field ~150).
+        return make_pipeline(
+            StandardScaler(),
+            LogisticRegression(solver="saga", class_weight=cw, max_iter=5000,
+                               random_state=seed, **p))
     if model_key == "rf":
         p["max_features"] = _RF_MAX_FEATURES.get(p.get("max_features", "sqrt"), "sqrt")
         return RandomForestClassifier(class_weight=cw, n_jobs=-1,
@@ -205,6 +208,13 @@ def make_model(model_key: str, params: dict, spw: float, seed: int = RANDOM_SEED
                                   subsample_freq=1, random_state=seed,
                                   verbose=-1, **p)
     raise ValueError(f"Unknown model key: {model_key}")
+
+
+def fit_model(model, X, y, w=None):
+    """Fit with optional sample weights, passing them to the last pipeline step."""
+    if isinstance(model, Pipeline):
+        return model.fit(X, y, **{f"{model.steps[-1][0]}__sample_weight": w})
+    return model.fit(X, y, sample_weight=w)
 
 
 # ===== TUNING =====
@@ -230,7 +240,7 @@ def tune(model_key: str, X, y, groups, n_trials: int, spw: float,
 
     def fold_loss(params, tr, va):
         model = make_model(model_key, params, spw, seed, weighted=weighted)
-        model.fit(X[tr], y[tr], sample_weight=w[tr])
+        fit_model(model, X[tr], y[tr], w[tr])
         p = np.clip(model.predict_proba(X[va])[:, 1], 1e-15, 1 - 1e-15)
         return log_loss(y[va], p, sample_weight=w[va], labels=[0, 1])
 
@@ -265,7 +275,7 @@ def generate_oof(model_params: dict, X, y, groups, spw: float,
     for tr, va in splits:
         for j, (name, params) in enumerate(model_params.items()):
             model = make_model(name, params, spw, seed, weighted=weighted)
-            model.fit(X[tr], y[tr], sample_weight=None if w is None else w[tr])
+            fit_model(model, X[tr], y[tr], None if w is None else w[tr])
             oof_sum[va, j] += model.predict_proba(X[va])[:, 1]
         oof_count[va] += 1
 
@@ -461,7 +471,7 @@ def train_market(market_name: str, train_df: pd.DataFrame, tour_key: str,
     final_models = {}
     for name, params in model_params.items():
         model = make_model(name, params, spw, seed, weighted=use_frac)
-        model.fit(X, y, sample_weight=w)
+        fit_model(model, X, y, w)
         final_models[name] = model
 
     return {
