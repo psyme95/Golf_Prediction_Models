@@ -23,7 +23,7 @@ r_legacy/         the original R version of the model
 
 ## Data
 
-Each row is one player in one tournament. The features include player ratings and recent form, course and location history, strokes-gained statistics, field size and strength, and bookmaker and exchange prices for each market. Historical rows also carry the finishing position and the settled result of each bet. The data cover 2020 to mid-2026 and are not included in this repository.
+Each row is one player in one tournament. The features include player ratings and recent form, course and location history, strokes-gained statistics, field size and strength, and bookmaker and exchange prices for each market. Historical rows also carry the finishing position and the settled result of each bet. The data cover 2020 to mid-2026 from Tour-Tips.com using a Master Data Subscription and are not included in this repository.
 
 Player strength only matters relative to the rest of that week's field, so most features are also expressed relative to the event: z-scores, percentiles, and differences from the field mean, median and best.
 
