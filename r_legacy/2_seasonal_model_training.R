@@ -1,5 +1,4 @@
 # ===== CONFIGURATION =====
-setwd("C:/Projects/Golf/Weekly_Modelling")
 set.seed(42)
 MODELS_TO_PROCESS <- c('GAM', 'RF', 'ANN', 'GBM', 'XGBOOST')
 CV_REPETITIONS <- 1

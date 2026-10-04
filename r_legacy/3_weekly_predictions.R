@@ -6,7 +6,6 @@ library(openxlsx)
 library(lubridate)
 
 # Set working directory
-setwd("C:/Projects/Golf/Weekly_Modelling")
 
 # Define tour configurations
 TOUR_CONFIG <- list(

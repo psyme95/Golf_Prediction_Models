@@ -3,7 +3,6 @@ library(tidyverse)
 library(readxl)
 library(openxlsx)
 
-setwd("C:/Projects/Golf/Weekly_Modelling")
 
 # ============================================
 # CONFIG

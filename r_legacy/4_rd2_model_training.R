@@ -2,7 +2,6 @@ library(biomod2)
 library(tidyverse)
 library(readxl)
 
-setwd("C:/Projects/Golf/Weekly_Modelling")
 
 # ============================================
 # CONFIG

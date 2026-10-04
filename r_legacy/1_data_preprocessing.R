@@ -9,24 +9,23 @@ library(lubridate)
 library(data.table)
 
 # ===== CONFIGURATION =====
-setwd("C:/Projects/Golf/")
 set.seed(42)
 
 # Tour configurations
 TOURS <- list(
   pga = list(
     name = "PGA Tour",
-    historical_input = "./Weekly_Modelling/Input/PGA.xlsx",
-    weekly_input = "./Weekly_Modelling/Input/This_Week_PGA.csv",
-    historical_output = "./Weekly_Modelling/Input/PGA_Processed.xlsx",
-    weekly_output = "./Weekly_Modelling/Input/This_Week_PGA_Processed.xlsx"
+    historical_input = "./Input/PGA.xlsx",
+    weekly_input = "./Input/This_Week_PGA.csv",
+    historical_output = "./Input/PGA_Processed.xlsx",
+    weekly_output = "./Input/This_Week_PGA_Processed.xlsx"
   ),
   euro = list(
     name = "European Tour",
-    historical_input = "./Weekly_Modelling/Input/Euro.xlsx",
-    weekly_input = "./Weekly_Modelling/Input/This_Week_Euro.csv",
-    historical_output = "./Weekly_Modelling/Input/Euro_Processed.xlsx",
-    weekly_output = "./Weekly_Modelling/Input/This_Week_Euro_Processed.xlsx"
+    historical_input = "./Input/Euro.xlsx",
+    weekly_input = "./Input/This_Week_Euro.csv",
+    historical_output = "./Input/Euro_Processed.xlsx",
+    weekly_output = "./Input/This_Week_Euro_Processed.xlsx"
   )
 )
 
@@ -334,5 +333,5 @@ for (tour_key in names(all_results)) {
   }
 }
 
-cat("\nOutput files saved to ./Weekly_Modelling/Input/\n")
+cat("\nOutput files saved to ./Input/\n")
 cat("Ready for modeling!\n")
