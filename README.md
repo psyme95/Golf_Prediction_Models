@@ -51,28 +51,29 @@ As an alternative (`--model bayes`), a Bayesian linear regression predicts each 
 
 ### Backtesting
 
-The walk-forward backtest trains on the two calendar years before each test year and prices every event in the test year, from 2022 to 2026. Bets are settled with dead-heat rules and 3% commission on the net P&L of each market. Strategy grids then sweep edge thresholds, odds bands and rating filters one at a time, reporting the number of profitable years and the worst year alongside total P&L and Sharpe ratio.
+The walk-forward backtest trains on a rolling window of the two calendar years before each test year and prices every event in the test year, from 2022 to 2026. Bets are settled with dead-heat rules and 3% commission on the net P&L of each market. Strategy grids then sweep edge thresholds, odds bands and rating filters one at a time, reporting the number of profitable years and the worst year alongside total P&L and Sharpe ratio.
 
 ## Results
 
-Full results, including model comparisons, robustness checks and negative results, are in [docs/backtest_results.md](docs/backtest_results.md). The figures below predate the modelling fixes made in October 2026 and will be updated once the walk-forward has been re-run.
+Full results, including model comparisons, robustness checks and negative results, are in [docs/backtest_results.md](docs/backtest_results.md). The figures below are from the walk-forward run of October 2026, with data to 16/08/2026.
 
-Laying every player whose model odds exceed the Betfair lay odds in the Top 20 market was profitable in all five test years on both tours:
+Laying every player in the Top 20 market whose model odds exceed the Betfair lay odds, at lay odds below 50, was profitable in all five test years on both tours:
 
 | | PGA | European Tour |
 |---|---|---|
-| Sharpe ratio (per event) | 0.497 | 0.466 |
+| Sharpe ratio (per event) | 0.504 | 0.496 |
 | Years profitable | 5/5 | 5/5 |
-| Return on liability | 1.23% | 1.08% |
+| Return on liability | 1.31% | 1.19% |
 
 The main findings were:
 
-- The best-calibrated model (the Bayesian model with market prices) was the worst bettor, because anchoring to the market removes the disagreement the strategy relies on.
-- The PGA Top 20 edge has fallen in every year since 2022, so recent years are a better guide than the five-year average.
+- Fixing errors in normalisation, class weighting and the meta-model improved calibration in every market, and raised the return on liability of the Top 20 strategy on both tours.
+- Better calibration in the longshot tail made the model lay many more extreme outsiders. Without an odds cap, this raised the Sharpe ratio but lowered the return on capital, so the cap is part of the rule.
+- Much of the apparent decline in the PGA edge was model error, but 2026 remains weak and a genuine trend cannot be ruled out.
 - No back betting or each-way strategy survived realistic prices.
 - A tie-breaking error that leaked finishing order into bet ranking was found by its implausible result (618% ROI) and fixed.
 
-The main limitation is that the betting rule was selected from around 950 strategy evaluations on the same out-of-sample predictions, so forward paper trading is the only fully independent test.
+The main limitation is that the betting rule was selected from several hundred strategy evaluations on the same out-of-sample predictions, so forward paper trading is the only fully independent test.
 
 ## Running
 
