@@ -72,13 +72,16 @@ def cmd_walkforward(args):
                    "--labels", args.labels,
                    "--features", args.features,
                    "--objective", args.objective,
-                   "--window", args.window]        # -u: unbuffered → logs stream live
+                   "--window", args.window,
+                   "--model", args.model,
+                   "--prior", args.prior,
+                   "--seed", str(args.seed)]       # -u: unbuffered → logs stream live
             if args.start_year:    cmd += ["--start-year", str(args.start_year)]
             if args.min_test_year: cmd += ["--min-test-year", str(args.min_test_year)]
             if args.max_test_year: cmd += ["--max-test-year", str(args.max_test_year)]
             if args.force_retrain: cmd += ["--force-retrain"]
             if args.tag:           cmd += ["--tag", args.tag]
-            log_path = LOGS_DIR / f"{tour}_walkforward.log"
+            log_path = LOGS_DIR / f"{tour}_walkforward_{args.model}.log"
             log = log_path.open("w", encoding="utf-8")
             procs[tour] = (subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT), log)
             print(f"Launched {tour} → {log_path}")
