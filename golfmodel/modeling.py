@@ -7,6 +7,7 @@ A bundle is {"markets": {market_name: market_pkg}}, where each market_pkg holds
 the fitted base models, the meta-model and the metadata needed to predict.
 """
 
+import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -43,6 +44,11 @@ from .config import (
 from .data import load_processed_historical, training_years_slice
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+# LightGBM with recent scikit-learn warns about feature names on every predict,
+# even though both fit and predict use plain arrays. Set here rather than in
+# __main__ so it also applies in the joblib worker processes.
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
 
 MODEL_NAMES = ["logistic", "rf", "lgbm", "xgb", "lgbm_dart"]
 
