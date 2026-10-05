@@ -2,7 +2,7 @@
 
 The ensemble in modeling.py trains a separate classifier per market, so nothing
 forces P(win) <= P(top5) <= P(top10) <= P(top20) and the walk-forward
-predictions break this ordering for around 1.8% of PGA rows. This model
+predictions break this ordering for around 1% of player-events. This model
 predicts the score instead and reads every market off the same simulated
 field, so the ordering holds by construction.
 
