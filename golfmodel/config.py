@@ -16,7 +16,9 @@ LOGS_DIR        = OUTPUT_DIR / "Logs"
 
 # ===== SEASON / TRAINING =====
 SEASON_SUFFIX  = "S26"
-TRAINING_YEARS = 2      # complete calendar years of training data
+TRAINING_YEARS = 2      # complete calendar years of training data (rolling window),
+                        # or the minimum before the first test year (expanding)
+WINDOWS = ["rolling", "expanding"]
 RANDOM_SEED    = 42
 
 # ===== OPTUNA / CV =====

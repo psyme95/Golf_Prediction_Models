@@ -51,7 +51,7 @@ As an alternative (`--model bayes`), a Bayesian linear regression predicts each 
 
 ### Backtesting
 
-The walk-forward backtest trains on a rolling window of the two calendar years before each test year and prices every event in the test year, from 2022 to 2026. Bets are settled with dead-heat rules and 3% commission on the net P&L of each market. Strategy grids then sweep edge thresholds, odds bands and rating filters one at a time, reporting the number of profitable years and the worst year alongside total P&L and Sharpe ratio.
+The walk-forward backtest trains on a rolling window of the two calendar years before each test year and prices every event in the test year, from 2022 to 2026. With `--window expanding`, each window instead trains on every year from the start of the data, and the same option applies to the seasonal model trained by `train`. Bets are settled with dead-heat rules and 3% commission on the net P&L of each market. Strategy grids then sweep edge thresholds, odds bands and rating filters one at a time, reporting the number of profitable years and the worst year alongside total P&L and Sharpe ratio.
 
 ## Results
 

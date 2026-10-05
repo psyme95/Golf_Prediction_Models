@@ -494,7 +494,7 @@ def train_tour(tour_key: str, n_trials: int = OPTUNA_TRIALS,
                models_dir: Path = MODELS_DIR,
                train_df: pd.DataFrame = None,
                labels: str = "naive", features: str = "base",
-               objective: str = "logloss") -> dict | None:
+               objective: str = "logloss", window: str = "rolling") -> dict | None:
     """Train all markets for one tour and save the bundle + summary.
     train_df override is used by the walk-forward (window slices)."""
     cfg = TOURS[tour_key]
@@ -504,7 +504,7 @@ def train_tour(tour_key: str, n_trials: int = OPTUNA_TRIALS,
         if not cfg["processed_historical"].exists():
             print(f"  Processed file not found: {cfg['processed_historical']}")
             return None
-        train_df = training_years_slice(load_processed_historical(tour_key))
+        train_df = training_years_slice(load_processed_historical(tour_key), window)
 
     markets = {}
     for market_name in MARKETS:
@@ -522,6 +522,7 @@ def train_tour(tour_key: str, n_trials: int = OPTUNA_TRIALS,
         "markets":    markets,
         "tour_key":   tour_key,
         "season":     SEASON_SUFFIX,
+        "window":     window,
         "trained_at": datetime.now(),
     }
     bundle_path = models_dir / f"{tour_key}_Trained_Models_{SEASON_SUFFIX}.pkl"

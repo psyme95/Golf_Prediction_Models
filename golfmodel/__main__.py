@@ -1,10 +1,11 @@
 """Golf prediction pipeline CLI.
 
   python -m golfmodel preprocess  [--kind historical|weekly]
-  python -m golfmodel train       [--trials N]
+  python -m golfmodel train       [--trials N] [--window rolling|expanding]
   python -m golfmodel predict
   python -m golfmodel season      [--year Y] [--no-grid]
-  python -m golfmodel walkforward [--trials N] [--model ensemble|bayes] [--tag NAME] ...
+  python -m golfmodel walkforward [--trials N] [--window rolling|expanding]
+                                  [--model ensemble|bayes] [--tag NAME] ...
   python -m golfmodel paper       --date dd-mm-yyyy
 
 All commands except paper take --tour PGA|Euro (default: both).
@@ -18,7 +19,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from .config import LOGS_DIR, OPTUNA_TRIALS, PAPER_DIR, RANDOM_SEED, TOURS
+from .config import LOGS_DIR, OPTUNA_TRIALS, PAPER_DIR, RANDOM_SEED, TOURS, WINDOWS
 
 # Consoles on legacy code pages (cp1252) can't encode characters like '→';
 # degrade them to '?' instead of crashing with UnicodeEncodeError.
@@ -45,7 +46,8 @@ def cmd_train(args):
     from .modeling import train_tour
     for tour in _tours(args):
         train_tour(tour, n_trials=args.trials, labels=args.labels,
-                   features=args.features, objective=args.objective)
+                   features=args.features, objective=args.objective,
+                   window=args.window)
 
 
 def cmd_predict(args):
@@ -69,7 +71,8 @@ def cmd_walkforward(args):
                    "--trials", str(args.trials),
                    "--labels", args.labels,
                    "--features", args.features,
-                   "--objective", args.objective]        # -u: unbuffered → logs stream live
+                   "--objective", args.objective,
+                   "--window", args.window]        # -u: unbuffered → logs stream live
             if args.start_year:    cmd += ["--start-year", str(args.start_year)]
             if args.min_test_year: cmd += ["--min-test-year", str(args.min_test_year)]
             if args.max_test_year: cmd += ["--max-test-year", str(args.max_test_year)]
@@ -95,7 +98,8 @@ def cmd_walkforward(args):
                                   start_year=args.start_year,
                                   min_test_year=args.min_test_year,
                                   max_test_year=args.max_test_year,
-                                  tag=args.tag, seed=args.seed)
+                                  tag=args.tag, seed=args.seed,
+                                  window=args.window)
         return
 
     from .backtest import run_walkforward
@@ -105,7 +109,7 @@ def cmd_walkforward(args):
                         max_test_year=args.max_test_year,
                         force_retrain=args.force_retrain, tag=args.tag,
                         labels=args.labels, features=args.features,
-                        objective=args.objective)
+                        objective=args.objective, window=args.window)
 
 
 def cmd_paper(args):
@@ -178,7 +182,11 @@ def main():
                         help="base = skill/course-fit only (lay baseline, default); "
                              "cross = + de-vigged cross-market prices; "
                              "odds = cross-market prices ONLY (ablation arm)")
+    window_arg = dict(choices=WINDOWS, default="rolling",
+                      help="rolling = last TRAINING_YEARS years (default); "
+                           "expanding = every year from the start of the data")
     add("train", cmd_train, **{"--trials": dict(type=int, default=OPTUNA_TRIALS),
+                               "--window": window_arg,
                                "--labels": labels_arg,
                                "--features": features_arg,
                                "--objective": objective_arg})
@@ -194,6 +202,7 @@ def main():
         "--max-test-year": dict(type=int, default=None,
                                 help="stop the walk early; exports cached windows"),
         "--force-retrain": dict(action="store_true"),
+        "--window": window_arg,
         "--parallel": dict(action="store_true"),
         "--tag": dict(default=None, help="segregate cache/output for A/B runs"),
         "--labels": labels_arg,

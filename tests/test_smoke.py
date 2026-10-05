@@ -160,6 +160,19 @@ assert abs(normalise(np.array([0.4, 0.2]), 1).sum() - 1.0) < 1e-12
 print("normalisation with dropped players: OK")
 
 
+# ===== training windows =====
+from golfmodel.backtest import get_windows
+from golfmodel.data import training_years_slice
+
+_years = pd.DataFrame({"Date": pd.to_datetime([f"{y}-06-01" for y in range(2020, 2027)])})
+# Both modes start testing in 2022 (two years in); only the training start differs.
+assert get_windows(_years) == [(y - 2, y - 1, y) for y in range(2022, 2027)]
+assert get_windows(_years, window="expanding") == [(2020, y - 1, y) for y in range(2022, 2027)]
+assert set(training_years_slice(_years)["Date"].dt.year) == {2024, 2025}
+assert set(training_years_slice(_years, "expanding")["Date"].dt.year) == set(range(2020, 2026))
+print("rolling and expanding windows: OK")
+
+
 # ===== dead-heat labels: weighted duplication == fractional cross-entropy =====
 # This is the assertion the entire label change rests on. All five base models
 # are classifiers that reject a continuous target; representing a fractional

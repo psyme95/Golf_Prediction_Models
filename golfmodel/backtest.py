@@ -707,14 +707,19 @@ def run_static(tour_key: str, year: int, no_grid: bool = False):
 # ===== WALK-FORWARD DRIVER =====
 
 def get_windows(df: pd.DataFrame, min_test_year: int = None,
-                max_test_year: int = None) -> list:
-    """(train_start, train_end, test_year) tuples with full training coverage."""
+                max_test_year: int = None, window: str = "rolling") -> list:
+    """(train_start, train_end, test_year) tuples with full training coverage.
+
+    rolling trains on the TRAINING_YEARS years before each test year; expanding
+    trains on every year from the start of the data. Both need TRAINING_YEARS
+    years before the first test year, so the two produce the same test years.
+    """
     years = sorted(df["Date"].dt.year.dropna().unique())
     windows = []
     for test_year in years:
-        train_start = test_year - TRAINING_YEARS
-        if train_start < years[0]:
+        if test_year - TRAINING_YEARS < years[0]:
             continue
+        train_start = years[0] if window == "expanding" else test_year - TRAINING_YEARS
         if min_test_year and test_year < min_test_year:
             continue
         # max_test_year stops the walk early, so a run interrupted partway can be
@@ -728,7 +733,7 @@ def get_windows(df: pd.DataFrame, min_test_year: int = None,
 def run_bayes_walkforward(tour_key: str, prior: str = "features",
                           start_year: int = None, min_test_year: int = None,
                           max_test_year: int = None, tag: str = None,
-                          seed: int = RANDOM_SEED):
+                          seed: int = RANDOM_SEED, window: str = "rolling"):
     """Walk-forward for the Bayesian field model (golfmodel.bayes).
 
     Same windows as run_walkforward, refit per window from the training years
@@ -741,6 +746,8 @@ def run_bayes_walkforward(tour_key: str, prior: str = "features",
 
     cfg = TOURS[tour_key]
     suffix = tag if tag else f"bayes_{prior}"
+    if window == "expanding":
+        suffix += "_expanding"
     out_name = f"{tour_key}_WalkForward_Backtest_{suffix}.xlsx"
     print(f"\n=== WALK-FORWARD [bayes/{prior}]: {cfg['name']} ===")
 
@@ -754,10 +761,10 @@ def run_bayes_walkforward(tour_key: str, prior: str = "features",
     print(f"  {len(df):,} rows | years "
           f"{int(df['Date'].dt.year.min())}-{int(df['Date'].dt.year.max())}")
 
-    windows = get_windows(df, min_test_year, max_test_year)
+    windows = get_windows(df, min_test_year, max_test_year, window)
     if not windows:
         print("  No valid windows."); return None
-    print(f"  Plan: {len(windows)} windows")
+    print(f"  Plan: {len(windows)} {window} windows")
 
     package = {name: None for name in MARKETS}
     all_preds, event_summaries = [], []
@@ -800,10 +807,14 @@ def run_walkforward(tour_key: str, n_trials: int, start_year: int = None,
                     min_test_year: int = None, max_test_year: int = None,
                     force_retrain: bool = False,
                     tag: str = None, labels: str = "naive",
-                    features: str = "base", objective: str = "logloss"):
+                    features: str = "base", objective: str = "logloss",
+                    window: str = "rolling"):
     """tag segregates cache dir and output file for A/B experiment runs
-    (e.g. --tag residual vs --tag noodds) without clobbering each other."""
+    (e.g. --tag residual vs --tag noodds) without clobbering each other.
+    Expanding-window runs are always kept apart from rolling ones."""
     cfg = TOURS[tour_key]
+    if window == "expanding":
+        tag = f"{tag}_expanding" if tag else "expanding"
     wf_models_dir = WF_MODELS_DIR / tag if tag else WF_MODELS_DIR
     out_name = (f"{tour_key}_WalkForward_Backtest_{tag}.xlsx" if tag
                 else f"{tour_key}_WalkForward_Backtest.xlsx")
@@ -820,10 +831,10 @@ def run_walkforward(tour_key: str, n_trials: int, start_year: int = None,
     print(f"  {len(df):,} rows | years "
           f"{int(df['Date'].dt.year.min())}–{int(df['Date'].dt.year.max())}")
 
-    windows = get_windows(df, min_test_year, max_test_year)
+    windows = get_windows(df, min_test_year, max_test_year, window)
     if not windows:
         print("  No valid windows."); return None
-    print(f"  Plan: {len(windows)} windows")
+    print(f"  Plan: {len(windows)} {window} windows")
 
     all_preds, event_summaries = [], []
     prev_window_dir = None

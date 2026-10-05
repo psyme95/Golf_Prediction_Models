@@ -237,10 +237,12 @@ def join_lay_odds(df: pd.DataFrame, raw_file: Path) -> pd.DataFrame:
     return df
 
 
-def training_years_slice(df: pd.DataFrame) -> pd.DataFrame:
-    """Last TRAINING_YEARS complete calendar years (excludes the in-progress year)."""
+def training_years_slice(df: pd.DataFrame, window: str = "rolling") -> pd.DataFrame:
+    """Complete calendar years to train on, excluding the in-progress year.
+    rolling: the last TRAINING_YEARS years. expanding: every year in the data."""
     max_year   = int(df["Date"].dt.year.max())
-    start_year = max_year - TRAINING_YEARS
+    start_year = (int(df["Date"].dt.year.min()) if window == "expanding"
+                  else max_year - TRAINING_YEARS)
     end_year   = max_year - 1
     subset = df[(df["Date"].dt.year >= start_year) & (df["Date"].dt.year <= end_year)]
     print(f"  Training window: {start_year}–{end_year} ({len(subset):,} of {len(df):,} rows)")
