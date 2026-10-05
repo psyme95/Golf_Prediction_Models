@@ -47,7 +47,7 @@ Ties across a market cut are settled as dead heats, so a player tied for 20th wi
 
 ### Bayesian field model
 
-As an alternative (`--model bayes`), a Bayesian linear regression predicts each player's score relative to the field, and Monte Carlo simulation of the whole field produces every market from the same finishing order. This guarantees P(win) ≤ P(top 5) ≤ P(top 10) ≤ P(top 20), which the per-market ensemble does not. Residuals are resampled within bands of predicted skill to keep their heteroscedasticity and skew, and simulated scores are rounded to golf's scoring granularity so that ties occur at a realistic rate.
+As an alternative (`--model bayes`), a Bayesian linear regression predicts each player's score relative to the field, and Monte Carlo simulation of the whole field produces every market from the same finishing order. This guarantees P(win) ≤ P(top 5) ≤ P(top 10) ≤ P(top 20), which the per-market ensemble does not. Residuals are resampled within bands of predicted skill to keep their heteroscedasticity and skew, and simulated scores are rounded to golf's scoring granularity so that ties occur at a realistic rate. It runs in minutes rather than hours, as there is nothing to tune, but is currently available in the walk-forward backtest only.
 
 ### Backtesting
 
@@ -55,7 +55,7 @@ The walk-forward backtest trains on a rolling window of the two calendar years b
 
 ## Results
 
-Full results, including model comparisons, robustness checks and negative results, are in [docs/backtest_results.md](docs/backtest_results.md). The figures below are from the walk-forward run of October 2026, with data to 16/08/2026.
+Full results, including model comparisons, robustness checks and negative results, are in [docs/backtest_results.md](docs/backtest_results.md). The figures below are from the walk-forward runs of October 2026, with data to 16/08/2026, using the rolling-window ensemble.
 
 Laying every player in the Top 20 market whose model odds exceed the Betfair lay odds, at lay odds below 50, was profitable in all five test years on both tours:
 
@@ -69,11 +69,12 @@ The main findings were:
 
 - Fixing errors in normalisation, class weighting and the meta-model improved calibration in every market, and raised the return on liability of the Top 20 strategy on both tours.
 - Better calibration in the longshot tail made the model lay many more extreme outsiders. Without an odds cap, this raised the Sharpe ratio but lowered the return on capital, so the cap is part of the rule.
-- Much of the apparent decline in the PGA edge was model error, but 2026 remains weak and a genuine trend cannot be ruled out.
+- Neither an expanding training window nor the Bayesian field model, with or without market prices, beat the rolling-window ensemble by more than chance. No alternative was best on both tours, and only the ensemble was profitable in every year on both tours.
+- Much of the apparent decline in the PGA edge was model error. PGA 2026 remains weak under every model and window tested, so a genuine decline cannot be ruled out.
 - No back betting or each-way strategy survived realistic prices.
 - A tie-breaking error that leaked finishing order into bet ranking was found by its implausible result (618% ROI) and fixed.
 
-The main limitation is that the betting rule was selected from several hundred strategy evaluations on the same out-of-sample predictions, so forward paper trading is the only fully independent test.
+The main limitation is that the betting rule, model and training window were chosen after inspecting the same out-of-sample predictions, so forward paper trading is the only fully independent test.
 
 ## Running
 
@@ -92,6 +93,15 @@ python -m golfmodel train           # seasonal models for each tour and market
 python -m golfmodel predict         # weekly prediction workbooks
 python -m golfmodel walkforward     # walk-forward backtest
 ```
+
+The alternatives in the results were run with:
+
+```
+python -m golfmodel walkforward --window expanding
+python -m golfmodel walkforward --model bayes --prior features   # or --prior market
+```
+
+`--parallel` runs both tours at once, with logs in `Output/Logs/`.
 
 Each command takes `--tour PGA` or `--tour Euro`, and `python -m golfmodel <command> -h` lists the remaining options. Outputs are written to `Output/`.
 
