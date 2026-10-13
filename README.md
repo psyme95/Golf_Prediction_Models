@@ -4,7 +4,7 @@ Probability models for professional golf finishing-position markets (Winner, Top
 
 The underlying problem is one of pricing: estimating the probability of an outcome for each player, and comparing it with the price a market is offering. Much of the work has therefore gone into calibration, into validation that does not leak information between training and test data, and into checking whether apparent edges survive realistic prices and settlement rules.
 
-The project is in paper trading. No real money has been staked.
+The project is in paper trading. No real money has been staked. Two bots record paper bets on Smarkets: the pre-event lay rule below, and backing the 54-hole leader. The bots run privately and are not part of this repository.
 
 ## Repository layout
 
@@ -15,9 +15,9 @@ golfmodel/        Python package and command-line interface
   modeling.py     grouped cross-validation, tuning, stacking and weekly predictions
   bayes.py        Bayesian field model (alternative to the ensemble)
   backtest.py     settlement, summaries, strategy grids and the walk-forward driver
-analysis/         one-off screens of back and each-way betting
+analysis/         back and each-way betting screens (other analysis scripts are kept private)
 tests/            smoke test on synthetic data
-docs/             backtest results write-up
+docs/             backtest results and paper-trading write-ups
 r_legacy/         the original R version of the model
 ```
 
@@ -104,6 +104,20 @@ python -m golfmodel walkforward --model bayes --prior features   # or --prior ma
 `--parallel` runs both tours at once, with logs in `Output/Logs/`.
 
 Each command takes `--tour PGA` or `--tour Euro`, and `python -m golfmodel <command> -h` lists the remaining options. Outputs are written to `Output/`.
+
+### Experiment tracking
+
+Walk-forward runs are logged to MLflow in `Output/mlflow.db`, through `golfmodel/tracking.py`. Each run records its options, its headline metrics and the git commit it ran from. The experiments are `pre-event`, `in-play`, `leader`, `screens` and `data-checks`.
+
+Other analyses (re-pricing, run comparisons, in-play and leader backtests) log to the same store.
+
+To browse the runs:
+
+```
+mlflow ui --backend-store-uri sqlite:///Output/mlflow.db
+```
+
+Then open http://127.0.0.1:5000.
 
 ## Background
 

@@ -17,3 +17,12 @@ r_legacy/Euro_R2/
 # Data, models and outputs (Python)
 /Input/
 /Output/
+
+# Secrets
+.env
+
+# Analysis
+analysis/
+
+# Private docs
+docs/paper_trading.md

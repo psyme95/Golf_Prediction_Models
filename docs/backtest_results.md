@@ -180,6 +180,63 @@ Before the fixes, the PGA return declined in every year. The corrected ensemble 
 
 PGA 2026 nevertheless remains weak. Across the six configurations its return on liability ranged from −0.50% to +0.42%, so the weakness does not depend on the choice of model or training window. With five yearly observations, a genuine decline in the PGA edge cannot be ruled out. The European Tour shows no clear trend.
 
+## 3b. Re-pricing at Betfair archive prices (October 2026)
+
+**Why.** The raw files' Top-N lay prices (`Lay_top5/10/20`) are often not prices anyone could have laid at.
+- 17-28% sit below every trade in the 72 h before the off.
+- The Top 20 lay book sums to 21.15, where fair is 20.
+- The Winner `Lay_odds` behaves like a genuine lay quote taken near the off.
+
+**How.** A re-pricing script re-prices the walk-forward predictions at the last traded price before the off, from the Betfair historical archive (`Input/data.tar`).
+- With the raw prices it reproduces each workbook's lay P&L exactly.
+- Commission is 2%. Lay ROI is on fixed liability.
+
+**Results, live model:**
+
+| Rule | Raw lay prices (same rows) | Last trade +1 tick | +2 ticks | Last trade × 1.05 |
+|---|---|---|---|---|
+| Top 20 lay below 50, PGA | +1.5% (5/5 years) | +1.4% (5/5) | +0.7% (3/5) | +0.5% (4/5) |
+| Top 20 lay below 50, European Tour | +1.0% (4/5) | +0.5% (4/5) | −0.1% (2/5) | −0.4% (1/5) |
+| Top 10 lay, all, PGA | +0.7% (4/5) | +1.9% (5/5) | +1.6% (5/5) | +1.2% (5/5) |
+| Top 10 lay, all, European Tour | +0.4% (3/5) | +0.4% (4/5) | −0.1% (1/5) | +0.1% (2/5) |
+
+- The live Top 20 lay rule holds only if lays are matched within about one tick of the traded price. Across all model variants, rules that pass on both tours fall from 117 at raw prices to 51 at +1 tick and 16 at +2 ticks.
+- The PGA Top 10 lay is the most robust result.
+- Top 5 and Winner lays are about zero. No back rule survives at realistic back prices.
+- Smarkets paper trading, which records real quotes, will settle the spread.
+
+**The model against the market.** On log-loss, the live model is slightly worse than the archive price at the off in 15 of 16 tour-market comparisons; several gaps are about 3 SE. The lay profit comes from where it disagrees with the market, not from beating it overall.
+
+**Exchange anchor** (`--anchor exchange --labels frac`, tag `exch_frac`):
+- Using the archive price as the meta-model's market input lowers Top 5/10/20 log-loss by 0.001-0.002 on both tours, in 4-5 of 5 years. Winner improves only on PGA.
+- The Top 20 lay result is unchanged within its intervals.
+- It still doesn't beat the market itself.
+- Dead-heat labels changed in the same run, so the two effects are not separated.
+- Live use would need an exchange price at prediction time.
+- **Re-priced betting.** The anchored models lay more often at a slightly lower ROI.
+  - Top 20 lay below 50 at +1 tick: PGA +1.0% / +1.5% (5/5 years) for the two runs; European Tour +0.2% / −0.2%.
+  - Lay rules passing on both tours at +1 tick: Top 10 14 → 1-2, Top 20 9 → 1, Top 5 3 → 0.
+  - The only back survivor (Top 20, odds below 5, priced 20 h before) is isolated and treated as noise.
+  - **Better forecasts did not give better bets. The current model stays live.**
+
+**Lay timing and chasing.** The live model, every price change in the 48 h before the off, lay = trade +1 tick, 2% commission.
+
+| Policy | Top 20 lay below 50, PGA | Top 20 lay below 50, European Tour | Top 10, PGA | Top 10, European Tour |
+|---|---|---|---|---|
+| Last trade before the off | +1.4% (5/5) | +0.5% (4/5) | +1.9% (5/5) | +0.4% (4/5) |
+| The same, traded within 6 h of the off | +0.6% (4/5) | −0.1% (3/5) | +1.0% (5/5) | −0.1% (1/5) |
+| First crossing in the 48 h | +2.1% (5/5) | +1.6% (5/5) | +1.6% (5/5) | +1.0% (5/5) |
+| Rest 10% better, fall back to the off | +1.5% (5/5) | +0.5% (4/5) | +2.0% (5/5) | +0.6% (5/5) |
+| Hindsight best price (a bound) | +4.4% | +4.3% | +3.4% | +2.1% |
+
+- **Stale prices flatter the off result.** Restricting to runners that traded in the last 6 h roughly halves the off-price ROI. The fresh subset is also the more liquid, shorter-priced runners.
+- **Laying at the first crossing beats waiting for the off** in Top 20 on both tours, and in European Tour Top 10. Part of this may be laying into brief price dips in a thin market. The 48 h window also opens before the weekly model odds arrive.
+- **Resting for a better price adds nothing.**
+  - Without a fallback, only 20-40% of resting orders fill. ROI per bet is similar, so total P&L falls.
+  - With a fallback, it is about the off result.
+- Top 5 and Winner are about zero under every policy.
+- Paper trading records first-cross, at-off and resting policies against real Smarkets quotes, which is the test that settles this.
+
 ## 4. Negative results
 
 - **Back betting.** Back bets were originally priced at the exchange lay quote, which is better than any price that can actually be backed at. They were therefore repriced at a 5% spread below the lay quote in every run (`analysis/back_screen.py`). The screen required positive P&L, at least 200 bets and four of five years positive, from 290 strategies per tour.
