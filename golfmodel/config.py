@@ -1,9 +1,11 @@
 """Paths, markets, features and per-tour settings."""
 
+import os
 from pathlib import Path
 
 # ===== PATHS =====
-ROOT_DIR = Path(__file__).resolve().parent.parent
+# GOLF_ROOT moves data and outputs elsewhere (Lambda: /tmp/golf, as its code dir is read-only).
+ROOT_DIR = Path(os.environ.get("GOLF_ROOT") or Path(__file__).resolve().parent.parent)
 
 RAW_DIR         = ROOT_DIR / "Input"
 INPUT_DIR       = ROOT_DIR / "Input"                       # processed files

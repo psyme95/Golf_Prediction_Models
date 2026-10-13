@@ -1,0 +1,9 @@
+# Allowlist: only what the Dockerfile copies. Keeps Input/ (data.tar), Output/
+# and golfmodel/.env (API keys) out of the image.
+*
+!requirements.txt
+!lambda_handler.py
+!golfmodel/*.py
+!analysis/paper_trader.py
+!analysis/lay_trader.py
+golfmodel/test_*.py

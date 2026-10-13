@@ -26,3 +26,6 @@ analysis/
 
 # Private docs
 docs/paper_trading.md
+
+# AWS SAM build output
+.aws-sam/

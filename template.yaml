@@ -1,0 +1,70 @@
+# AWS SAM: everything the deployment needs. `sam build && sam deploy` (README).
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Golf model weekly predictions and paper-trading bots
+
+Resources:
+  # The bots' disk: Input/ (This_Week CSVs), Output/ (state, bundles, predictions).
+  Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain          # `sam delete` must never take the bet logs with it
+    UpdateReplacePolicy: Retain
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled             # every overwrite is recoverable for 30 days
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true  # uploads become EventBridge events (WeeklyUpload)
+
+  GolfFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      Architectures: [x86_64]
+      MemorySize: 2048
+      Timeout: 300
+      ReservedConcurrentExecutions: 1   # one run at a time, so runs never race on the state files
+      LoggingConfig:
+        LogGroup: !Ref Logs             # created first, so Lambda never makes its own without retention
+      Environment:
+        Variables:
+          BUCKET: !Ref Bucket
+          GOLF_ROOT: /tmp/golf
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref Bucket
+      Events:
+        Every20Minutes:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: rate(20 minutes)
+        WeeklyUpload:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source: [aws.s3]
+              detail-type: [Object Created]
+              detail:
+                bucket:
+                  name: [!Ref Bucket]
+                object:
+                  key: [{prefix: Input/This_Week_}]
+    Metadata:
+      DockerContext: .
+      Dockerfile: Dockerfile
+
+  Logs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/golfmodel
+      RetentionInDays: 30
+
+Outputs:
+  BucketName:
+    Value: !Ref Bucket

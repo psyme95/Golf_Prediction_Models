@@ -19,6 +19,7 @@ analysis/         back and each-way betting screens (other analysis scripts are 
 tests/            smoke test on synthetic data
 docs/             backtest results and paper-trading write-ups
 r_legacy/         the original R version of the model
+lambda_handler.py AWS Lambda entry point (Dockerfile, template.yaml: see Deploying to AWS)
 ```
 
 ## Data
@@ -118,6 +119,81 @@ mlflow ui --backend-store-uri sqlite:///Output/mlflow.db
 ```
 
 Then open http://127.0.0.1:5000.
+
+### Deploying to AWS
+
+The weekly predictions and the two paper-trading bots (`analysis/paper_trader.py` and `analysis/lay_trader.py`, which are kept out of this repository) run on AWS Lambda.
+
+- **Container:** one image is built from `Dockerfile`. Only the files allowlisted in `.dockerignore` go into it.
+- **Infrastructure:** everything is declared in `template.yaml`.
+- **Handler:** `lambda_handler.py` is the entry point.
+
+Training stays local.
+
+```
+upload This_Week_<TOUR>.csv to s3://BUCKET/Input/
+        |  S3 "Object Created" -> EventBridge rule
+        v
+  Lambda: copy bot state from S3 to /tmp/golf
+          [upload only] preprocess + predict that tour, lay_trader.py load
+          paper_trader.py bot --once; lay_trader.py bot
+          copy changed files back to S3
+        ^
+  EventBridge Scheduler, every 20 minutes
+```
+
+**S3 bucket.** It holds `Input/` (the weekly CSVs) and `Output/`:
+- the bot state in `PaperTrades/` and `LayTrades/`
+- the model bundles in `Models/`
+- the prediction workbooks in `Predictions/`
+
+The bucket is versioned, so any overwrite can be undone for 30 days, and `sam delete` keeps it.
+
+**Running locally vs on Lambda.** `GOLF_ROOT` points the code at `/tmp/golf` on Lambda. Unset, everything runs from the repository as before.
+
+**Cost.** Usage sits inside the Lambda and EventBridge free tiers. S3, ECR (the image) and CloudWatch Logs come to pennies a month.
+
+#### One-time setup
+
+1. Install Docker Desktop, the AWS CLI and the SAM CLI:
+   ```
+   winget install Docker.DockerDesktop Amazon.AWSCLI Amazon.SAM-CLI
+   ```
+2. Sign in with `aws login`, or with `aws configure` and an IAM user's access key. Use the region `eu-west-2`.
+3. In the AWS Billing console, add a zero-spend budget alert.
+4. Deploy:
+   ```
+   sam build
+   sam deploy --guided    # stack name golfmodel, region eu-west-2; accept the defaults
+   ```
+   The bucket name is printed as `BucketName`. Until state is copied in, every run stops with "No bot state", by design.
+5. Copy in the bot state and the model bundles:
+   ```
+   aws s3 sync ../golf-paper-trader/Output s3://BUCKET/Output
+   aws s3 cp Output/Models/PGA_Trained_Models_S26.pkl s3://BUCKET/Output/Models/
+   aws s3 cp Output/Models/Euro_Trained_Models_S26.pkl s3://BUCKET/Output/Models/
+   ```
+
+#### Weekly
+
+```
+aws s3 cp Input/This_Week_PGA.csv s3://BUCKET/Input/
+aws s3 cp Input/This_Week_Euro.csv s3://BUCKET/Input/
+```
+
+Each upload predicts that tour and loads the model odds into the lay bot. The predictions land in `s3://BUCKET/Output/Predictions/`.
+
+#### Day to day
+
+- **Watch the runs:** `sam logs -n GolfFunction --stack-name golfmodel --tail`.
+- **Trigger a run by hand:** `sam remote invoke GolfFunction --stack-name golfmodel --event "{}"`.
+- **Reports:** pull the state, then run the bot's `report` locally:
+  ```
+  aws s3 sync s3://BUCKET/Output/PaperTrades Output/PaperTrades
+  ```
+- **After a code change:** `sam build && sam deploy`.
+- **After a retrain:** upload the new bundles. A new `SEASON_SUFFIX` also needs a redeploy.
+- **After `paper_trader.py refit`:** upload `model_params.json` to `Output/PaperTrades/`.
 
 ## Background
 
