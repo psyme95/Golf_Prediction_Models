@@ -47,7 +47,7 @@ from .config import (
     TOURS,
     TRAINING_YEARS,
 )
-from .data import join_lay_odds, load_processed_historical
+from .data import join_exchange_prices, join_lay_odds, load_processed_historical
 from .excel_out import write_workbook
 from .modeling import (ensemble_predict, load_bundle, market_share, normalise,
                        train_market, tss_optimal)
@@ -116,7 +116,7 @@ def predict_event(event_full: pd.DataFrame, market_pkg: dict) -> pd.DataFrame | 
     for col in model_vars + [odds_col]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     kept  = df[model_vars + [odds_col]].notna().all(axis=1)
-    share = market_share(df[odds_col], kept)
+    share = market_share(df[market_pkg.get("share_col", odds_col)], kept)
     df = df[kept]
     if df.empty:
         return None
@@ -800,6 +800,10 @@ def run_bayes_walkforward(tour_key: str, prior: str = "features",
     back_grid = run_back_grid(results["all_predictions"])
     lay_grid  = run_lay_grid(results["all_predictions"])
     export_results(results, BACKTESTS_DIR / out_name, back_grid, lay_grid)
+    track_walkforward(tour_key, BACKTESTS_DIR / out_name, results["summary"],
+                      results.get("season_summary"),
+                      {"model": "bayes", "prior": prior, "start_year": start_year,
+                       "window": window, "tag": tag, "seed": seed})
     return results
 
 
@@ -808,7 +812,7 @@ def run_walkforward(tour_key: str, n_trials: int, start_year: int = None,
                     force_retrain: bool = False,
                     tag: str = None, labels: str = "naive",
                     features: str = "base", objective: str = "logloss",
-                    window: str = "rolling"):
+                    window: str = "rolling", anchor: str = "book"):
     """tag segregates cache dir and output file for A/B experiment runs
     (e.g. --tag residual vs --tag noodds) without clobbering each other.
     Expanding-window runs are always kept apart from rolling ones."""
@@ -828,6 +832,8 @@ def run_walkforward(tour_key: str, n_trials: int, start_year: int = None,
     if start_year:
         df = df[df["Date"].dt.year >= start_year].copy()
     df = join_lay_odds(df, cfg["raw_historical"])
+    if anchor == "exchange":
+        df = join_exchange_prices(df)
     print(f"  {len(df):,} rows | years "
           f"{int(df['Date'].dt.year.min())}–{int(df['Date'].dt.year.max())}")
 
@@ -866,7 +872,7 @@ def run_walkforward(tour_key: str, n_trials: int, start_year: int = None,
                 result = train_market(market_name, train_df, tour_key,
                                       cfg["use_meta_odds"], n_trials, window_dir,
                                       labels=labels, features=features,
-                                      objective=objective)
+                                      objective=objective, anchor=anchor)
                 if result is not None:
                     package[market_name] = result
             if package:
@@ -897,4 +903,26 @@ def run_walkforward(tour_key: str, n_trials: int, start_year: int = None,
     back_grid = run_back_grid(results["all_predictions"])
     lay_grid  = run_lay_grid(results["all_predictions"])
     export_results(results, BACKTESTS_DIR / out_name, back_grid, lay_grid)
+    track_walkforward(tour_key, BACKTESTS_DIR / out_name, results["summary"],
+                      results.get("season_summary"),
+                      {"model": "ensemble", "trials": n_trials, "start_year": start_year,
+                       "window": window, "tag": tag, "labels": labels,
+                       "features": features, "objective": objective, "anchor": anchor})
     return results
+
+
+SUMMARY_METRICS = ["N_Events", "AUC", "Log_Loss", "Brier", "Back_NBets", "Back_ROI",
+                   "Lay_NBets", "Lay_ROI_FixedLiab", "Lay_ROI_FixedStake"]
+
+
+def track_walkforward(tour_key: str, out_path: Path, summary: pd.DataFrame,
+                      season_summary: pd.DataFrame | None, params: dict) -> None:
+    """Log a walk-forward run to MLflow (experiment pre-event): its options, the
+    per-market and per-market-year summary metrics, and the workbook's path (the
+    workbooks are ~14 MB, so they are referenced rather than copied)."""
+    from .tracking import log_table, tracked_run
+    with tracked_run("pre-event", out_path.stem, {"tour": tour_key, **params},
+                     {"workbook": str(out_path)}):
+        log_table(summary, ["Market"], SUMMARY_METRICS)
+        if season_summary is not None and len(season_summary):
+            log_table(season_summary, ["Market", "Test_Year"], SUMMARY_METRICS)

@@ -30,6 +30,8 @@ from .config import (
     BACK_OBJ_POWER,
     BASE_MODEL_VARS,
     CROSS_MARKET_VARS,
+    EXCHANGE_ODDS_COLS,
+    FORM_Z_VARS,
     FRAC_LABEL_COLS,
     MARKETS,
     MODELS_DIR,
@@ -261,17 +263,20 @@ def tune(model_key: str, X, y, groups, n_trials: int,
 # ===== OOF + META =====
 
 def generate_oof(model_params: dict, X, y, groups,
-                 seed: int = RANDOM_SEED, w=None):
+                 seed: int = RANDOM_SEED, w=None, n_repeats: int = N_CV_REPEATS,
+                 make=None):
     """Out-of-fold predictions for all models over repeated grouped CV.
-    Returns (oof_matrix, covered_mask); rows never validated are masked out."""
-    splits = grouped_cv_splits(X, y, groups, n_repeats=N_CV_REPEATS, seed=seed)
+    Returns (oof_matrix, covered_mask); rows never validated are masked out.
+    make(name, params, seed) builds a model; default make_model."""
+    make = make or make_model
+    splits = grouped_cv_splits(X, y, groups, n_repeats=n_repeats, seed=seed)
     n, m = len(y), len(model_params)
     oof_sum   = np.zeros((n, m))
     oof_count = np.zeros(n, dtype=int)   # identical across models (same splits)
 
     for tr, va in splits:
         for j, (name, params) in enumerate(model_params.items()):
-            model = make_model(name, params, seed)
+            model = make(name, params, seed)
             fit_model(model, X[tr], y[tr], None if w is None else w[tr])
             oof_sum[va, j] += model.predict_proba(X[va])[:, 1]
         oof_count[va] += 1
@@ -352,7 +357,8 @@ def ensemble_predict(market_pkg: dict, X: np.ndarray, odds_values=None):
 def train_market(market_name: str, train_df: pd.DataFrame, tour_key: str,
                  use_meta_odds: bool, n_trials: int, models_dir: Path,
                  seed: int = RANDOM_SEED, labels: str = "naive",
-                 features: str = "base", objective: str = "logloss") -> dict | None:
+                 features: str = "base", objective: str = "logloss",
+                 anchor: str = "book") -> dict | None:
     """Tune, stack, and calibrate one market. Returns the market package.
 
     labels="naive" trains on the binary `posn <= k` target (the lay baseline,
@@ -366,6 +372,12 @@ def train_market(market_name: str, train_df: pd.DataFrame, tour_key: str,
     """
     market = MARKETS[market_name]
     target_col, odds_col = market["target_col"], market["odds_col"]
+    # anchor="exchange": the meta-model's market input is the Betfair archive price
+    # (training is then limited to rows it priced); normalisation keeps the book
+    # prices, which cover the whole field.
+    share_col = odds_col
+    if anchor == "exchange":
+        odds_col = EXCHANGE_ODDS_COLS[market_name]
 
     # Winner has no single-odds profit column, so it keeps the binary label.
     frac_col = FRAC_LABEL_COLS.get(market_name, (None,) * 4)[3]
@@ -375,6 +387,7 @@ def train_market(market_name: str, train_df: pd.DataFrame, tour_key: str,
     label_col = frac_col if use_frac else target_col
 
     wanted = {"base":  BASE_MODEL_VARS,
+              "form":  BASE_MODEL_VARS + FORM_Z_VARS,
               "cross": BASE_MODEL_VARS + CROSS_MARKET_VARS,
               "odds":  CROSS_MARKET_VARS}[features]        # "odds" = ablation arm
     available_vars = [v for v in wanted if v in train_df.columns]
@@ -477,6 +490,8 @@ def train_market(market_name: str, train_df: pd.DataFrame, tour_key: str,
         "meta_market_coef": meta_market_coef,
         "model_vars":     available_vars,
         "odds_col":       odds_col,
+        "share_col":      share_col,
+        "anchor":         anchor,
         "market_size":    market["market_size"],
         "features":       features,
         "objective":      objective,

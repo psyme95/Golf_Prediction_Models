@@ -11,8 +11,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .config import (CROSS_MARKET_ODDS, CROSS_MARKET_SIZE, DROP_COLS,
-                     FRAC_LABEL_COLS, FRAC_STAKE, LAY_ODDS_COLS,
+from .config import (ARCHIVE_PRICES, CROSS_MARKET_ODDS, CROSS_MARKET_SIZE, DROP_COLS,
+                     EXCHANGE_ODDS_COLS, FRAC_LABEL_COLS, FRAC_STAKE, LAY_ODDS_COLS,
                      MKT_MIN_COVERAGE, TOURS, TRAINING_YEARS)
 
 # Raw columns that may arrive as strings but must be numeric.
@@ -164,7 +164,8 @@ def add_event_features(df: pd.DataFrame, historical: bool) -> pd.DataFrame:
         df["sg_short_game"] = df["sgatg"] + df["sgp"]
         sg_cols.append("sg_short_game")
 
-    for col in sg_cols:
+    form_cols = [c for c in ["X_1yr", "X_6m", "yr3_All", "current"] if c in df.columns]
+    for col in sg_cols + form_cols:
         df = _field_relatives(df, col, group)
 
     return add_market_probs(df, group)
@@ -234,6 +235,20 @@ def join_lay_odds(df: pd.DataFrame, raw_file: Path) -> pd.DataFrame:
 
     n = df[present[0]].notna().sum()
     print(f"  Lay odds joined: {n:,}/{len(df):,} rows ({100 * n / len(df):.1f}%)")
+    return df
+
+
+def join_exchange_prices(df: pd.DataFrame) -> pd.DataFrame:
+    """Left-join the Betfair archive's last traded price before the off, per market,
+    as EXCHANGE_ODDS_COLS (BF_win, BF_top5, ...), on Date + playerID."""
+    p = pd.read_parquet(ARCHIVE_PRICES, columns=["date", "playerID", "market", "round", "ltp"])
+    p = p[(p["round"] == 1) & (p["ltp"] > 1) & (p["ltp"] < 1000)]
+    wide = (p.pivot_table(index=["date", "playerID"], columns="market", values="ltp", aggfunc="first")
+             .rename(columns=EXCHANGE_ODDS_COLS).reset_index().rename(columns={"date": "Date"}))
+    df = df.drop(columns=[c for c in EXCHANGE_ODDS_COLS.values() if c in df.columns])
+    df = df.merge(wide, on=["Date", "playerID"], how="left")
+    n = df["BF_win"].notna().sum()
+    print(f"  Exchange prices joined: {n:,}/{len(df):,} rows ({100 * n / len(df):.1f}%)")
     return df
 
 

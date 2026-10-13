@@ -34,6 +34,13 @@ MARKETS = {
     "Top20":  {"target_col": "top_20", "odds_col": "Top20_odds", "market_size": 20},
 }
 
+# Meta-model market anchor. "book" = the raw files' MARKETS odds_col (bookmaker-like
+# prices); "exchange" = the Betfair archive's last traded price before the off
+# (Output/Notes/inplay_archive/data/market_prices.parquet), joined at train time.
+ANCHORS = ["book", "exchange"]
+EXCHANGE_ODDS_COLS = {"Winner": "BF_win", "Top5": "BF_top5", "Top10": "BF_top10", "Top20": "BF_top20"}
+ARCHIVE_PRICES = OUTPUT_DIR / "Notes" / "inplay_archive" / "data" / "market_prices.parquet"
+
 # Betfair lay odds column per market (pre-event snapshots; joined from raw file).
 LAY_ODDS_COLS = {
     "Winner": "Lay_odds",
@@ -151,6 +158,16 @@ BASE_MODEL_VARS = [
     "sgp_field_zscore",
     "sg_ball_striking_field_zscore",
     "sg_short_game_field_zscore",
+]
+
+# Field z-scores of the form ratings, which BASE_MODEL_VARS has only as raw
+# values (--features form). The all-features screen (analysis/xgb_screen.py)
+# found their within-field ranks more useful than the raw values.
+FORM_Z_VARS = [
+    "X_1yr_field_zscore",
+    "X_6m_field_zscore",
+    "yr3_All_field_zscore",
+    "current_field_zscore",
 ]
 
 # Raw columns excluded from processed feature files (betting results / odds

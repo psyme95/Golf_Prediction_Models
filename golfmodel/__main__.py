@@ -19,7 +19,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from .config import LOGS_DIR, OPTUNA_TRIALS, PAPER_DIR, RANDOM_SEED, TOURS, WINDOWS
+from .config import ANCHORS, LOGS_DIR, OPTUNA_TRIALS, PAPER_DIR, RANDOM_SEED, TOURS, WINDOWS
 
 # Consoles on legacy code pages (cp1252) can't encode characters like '→';
 # degrade them to '?' instead of crashing with UnicodeEncodeError.
@@ -73,6 +73,7 @@ def cmd_walkforward(args):
                    "--features", args.features,
                    "--objective", args.objective,
                    "--window", args.window,
+                   "--anchor", args.anchor,
                    "--model", args.model,
                    "--prior", args.prior,
                    "--seed", str(args.seed)]       # -u: unbuffered → logs stream live
@@ -112,7 +113,8 @@ def cmd_walkforward(args):
                         max_test_year=args.max_test_year,
                         force_retrain=args.force_retrain, tag=args.tag,
                         labels=args.labels, features=args.features,
-                        objective=args.objective, window=args.window)
+                        objective=args.objective, window=args.window,
+                        anchor=args.anchor)
 
 
 def cmd_paper(args):
@@ -181,8 +183,9 @@ def main():
     objective_arg = dict(choices=["logloss", "shortprice"], default="logloss",
                          help="logloss = plain calibration (lay baseline, default); "
                               "shortprice = tilt the objective toward backable prices")
-    features_arg = dict(choices=["base", "cross", "odds"], default="base",
+    features_arg = dict(choices=["base", "form", "cross", "odds"], default="base",
                         help="base = skill/course-fit only (lay baseline, default); "
+                             "form = + field z-scores of the form ratings; "
                              "cross = + de-vigged cross-market prices; "
                              "odds = cross-market prices ONLY (ablation arm)")
     window_arg = dict(choices=WINDOWS, default="rolling",
@@ -211,6 +214,9 @@ def main():
         "--labels": labels_arg,
         "--features": features_arg,
         "--objective": objective_arg,
+        "--anchor": dict(choices=ANCHORS, default="book",
+                         help="book = raw-file odds as the meta-model's market input (default); "
+                              "exchange = Betfair archive price before the off"),
         "--model": dict(choices=["ensemble", "bayes"], default="ensemble",
                         help="ensemble = per-market classifier stacks (default); "
                              "bayes = posterior-predictive field simulation, all "
