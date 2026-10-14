@@ -1,6 +1,9 @@
 # Lambda image for lambda_handler.py. Built and pushed by `sam build && sam deploy`.
 FROM public.ecr.aws/lambda/python:3.13
 
+# LightGBM needs the OpenMP runtime, which the base image lacks.
+RUN dnf install -y libgomp && dnf clean all
+
 # Same pins as local, so the pickled model bundles load identically. mlflow is
 # only for experiment tracking, and xgboost-cpu is xgboost without the CUDA
 # libraries (~200 MB smaller).

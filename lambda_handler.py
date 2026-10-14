@@ -59,6 +59,8 @@ def handler(event, context):
         raise RuntimeError(f"No bot state in s3://{BUCKET}/Output/: copy it in first (README).")
 
     ok = True
+    if not isinstance(event, dict):            # the scheduler can send a plain string
+        event = {}
     key = event.get("detail", {}).get("object", {}).get("key", "")
     if key.startswith(WEEKLY):
         tour = key.removeprefix(WEEKLY).removesuffix(".csv")
