@@ -164,7 +164,7 @@ The bucket is versioned, so any overwrite can be undone for 30 days, and `sam de
 4. Deploy:
    ```
    sam build
-   sam deploy --guided    # stack name golfmodel, region eu-west-2; accept the defaults
+   sam deploy --guided    # stack name golf-prediction-models, region eu-west-2; accept the defaults
    ```
    The bucket name is printed as `BucketName`. Until state is copied in, every run stops with "No bot state", by design.
 5. Copy in the bot state and the model bundles:
@@ -185,8 +185,8 @@ Each upload predicts that tour and loads the model odds into the lay bot. The pr
 
 #### Day to day
 
-- **Watch the runs:** `sam logs -n GolfFunction --stack-name golfmodel --tail`.
-- **Trigger a run by hand:** `sam remote invoke GolfFunction --stack-name golfmodel --event "{}"`.
+- **Watch the runs:** `sam logs -n GolfFunction --stack-name golf-prediction-models --tail`.
+- **Trigger a run by hand:** `sam remote invoke GolfFunction --stack-name golf-prediction-models --event "{}"`.
 - **Reports:** pull the state, then run the bot's `report` locally:
   ```
   aws s3 sync s3://BUCKET/Output/PaperTrades Output/PaperTrades
