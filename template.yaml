@@ -29,7 +29,9 @@ Resources:
       Architectures: [x86_64]
       MemorySize: 2048
       Timeout: 300
-      ReservedConcurrentExecutions: 1   # one run at a time, so runs never race on the state files
+      # ponytail: no ReservedConcurrentExecutions: 1, as new accounts (limit 10) can't reserve any.
+      # An upload landing inside a scheduled run's ~30 s could race on the state files;
+      # S3 versioning makes that recoverable. Re-add once the account limit is 1000.
       LoggingConfig:
         LogGroup: !Ref Logs             # created first, so Lambda never makes its own without retention
       Environment:
